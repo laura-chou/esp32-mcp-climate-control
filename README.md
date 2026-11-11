@@ -17,6 +17,7 @@ ESP32 ──HTTP POST /api/climate──▶ FastAPI ──SSE /api/stream──�
 ```
 .
 ├── main.py                     # 進入點：python main.py（監聽 0.0.0.0:8801）
+├── climate_agent.py            # 環境代理人：訂閱 SSE → Ollama 推理 → 回推指令
 ├── requirements.txt
 ├── pytest.ini
 ├── server/
@@ -27,12 +28,13 @@ ESP32 ──HTTP POST /api/climate──▶ FastAPI ──SSE /api/stream──�
 │   └── rules.py                # 規則式風扇決策（AI 代理人失效時的後備）
 ├── examples/
 │   ├── esp32_simulator.py      # 模擬 ESP32：上報資料 + 輪詢指令
-│   └── mcp_agent_consumer.py   # 模擬 MCP 核心：訂閱 SSE 並回推指令
+│   └── mcp_agent_consumer.py   # 精簡版 MCP 消費者（佔位決策，示範用）
 ├── esp32/                      # ⚠️ ESP32 端 MicroPython 韌體（放到開發板上）
 │   ├── main.py                 # 讀 DHT22 → 上報 → 輪詢指令 → 控制繼電器
 │   └── config.py               # WiFi、PC IP、腳位設定（要先編輯）
 └── tests/
-    └── test_transport.py       # pytest 測試（含真實 SSE 串流）
+    ├── test_transport.py       # pytest 測試（含真實 SSE 串流）
+    └── test_climate_agent.py   # 代理人決策 / 解析 / 後備 / 防抖測試
 ```
 
 ## 安裝與執行
@@ -180,9 +182,52 @@ curl -X POST http://127.0.0.1:8801/api/fan/command \
 
 ```bash
 python main.py                         # 1. 伺服器
-python examples/esp32_simulator.py     # 2. 模擬 ESP32 上報
-python examples/mcp_agent_consumer.py  # 3. 模擬 MCP 核心（SSE 訂閱 + 回推指令）
+python climate_agent.py                # 2. 環境代理人（需先啟動 Ollama）
+python examples/esp32_simulator.py     # 3. 模擬 ESP32 上報
 ```
+
+沒有 Ollama 時，可用 `examples/mcp_agent_consumer.py` 取代第 2 步（佔位決策）。
+
+## 環境代理人（climate_agent.py）
+
+對應架構圖的 `climate_agent.py`。它訂閱 `/api/stream`，每收到一筆 `reading`
+就呼叫本機 Ollama 模型（Qwen2.5 / Llama3）判斷風扇 ON/OFF，再 `POST
+/api/fan/command` 回推：
+
+```
+/api/stream ──reading──▶ climate_agent ──prompt──▶ Ollama
+                              │
+                              └──POST /api/fan/command──▶ FastAPI ──▶ ESP32
+```
+
+```bash
+# 前置：Ollama 執行中，且已拉取模型
+ollama serve &
+ollama pull qwen2.5
+
+python climate_agent.py --model qwen2.5
+```
+
+常用參數：
+
+| 參數 | 預設 | 說明 |
+| --- | --- | --- |
+| `--base` | `http://127.0.0.1:8801` | 傳輸層位址 |
+| `--ollama` | `http://127.0.0.1:11434` | Ollama 位址 |
+| `--model` | `qwen2.5` | 模型名稱 |
+| `--token` | 無 | 對應伺服器的 `CLIMATE_AUTH_TOKEN` |
+| `--min-switch-seconds` | `15` | 非緊急情況下兩次切換的最短間隔（防抖） |
+| `--dry-run` | 關 | 只印決策、不推送指令 |
+
+**設計重點**
+
+- **模型回傳 JSON**：要求模型輸出 `{"command":"ON|OFF","reason":"..."}`，並用
+  `format=json` 約束；解析失敗即視為無效。
+- **規則後備**：Ollama 連不上或回傳無法解析時，自動改用 `server/rules.py`
+  的遲滯規則，確保迴圈不中斷。
+- **防抖護欄**：除非讀值明顯偏離舒適帶（緊急），否則兩次切換需間隔
+  `--min-switch-seconds`，避免模型抖動造成繼電器狂切。
+- **斷線重連**：SSE 串流中斷時以指數退避自動重連。
 
 ## 設定（環境變數）
 
@@ -204,10 +249,10 @@ pytest
 ```
 
 涵蓋：上報與規則決策、遲滯行為、輸入驗證、代理人覆寫、輪詢 / long-poll、
-真實 SSE 串流（以 uvicorn 實跑）、token 驗證、健康與狀態端點。
+真實 SSE 串流（以 uvicorn 實跑）、token 驗證、健康與狀態端點，以及
+`climate_agent` 的決策解析、Ollama 後備與防抖護欄。
 
 ## 後續整合（尚未實作）
 
-- `climate_agent.py` 內的 `decide_with_placeholder_agent()` 改為實際呼叫 Ollama。
 - 以 `mcp` SDK 將 `/api/stream` 與 `/api/fan/command` 包裝成 MCP tools。
 - 需要跨行程 / 多實例時，把 `ClimateHub` 的記憶體匯流排換成 MQTT 或 Redis。
