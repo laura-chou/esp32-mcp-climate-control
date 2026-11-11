@@ -1,0 +1,37 @@
+"""ESP32 configuration - EDIT THIS FILE, then copy it to the board.
+
+Copy both ``config.py`` and ``main.py`` onto the ESP32 (e.g. with mpremote):
+
+    mpremote connect /dev/ttyUSB0 fs cp esp32/config.py :config.py
+    mpremote connect /dev/ttyUSB0 fs cp esp32/main.py   :main.py
+"""
+
+# --- Wi-Fi -----------------------------------------------------------------
+WIFI_SSID = "YOUR_WIFI_SSID"
+WIFI_PASSWORD = "YOUR_WIFI_PASSWORD"
+
+# --- PC transport layer ----------------------------------------------------
+# NOTE: 192.168.0.0 is a NETWORK address and is NOT reachable. Replace it with
+# the LAN IP of the computer running the FastAPI server (e.g. 192.168.0.100).
+# Find it on the PC with:  ipconfig (Windows) / ifconfig | ip addr (Linux/macOS)
+SERVER_HOST = "192.168.0.0"
+SERVER_PORT = 8801
+
+DEVICE_ID = "esp32-climate-01"
+
+# Set this to the same value as CLIMATE_AUTH_TOKEN on the server, or leave it
+# as None when the server runs without a token.
+DEVICE_TOKEN = None
+
+# --- Pins ------------------------------------------------------------------
+DHT_PIN = 21          # DHT22 data pin
+RELAY_INL_PIN = 22    # left relay / fan
+RELAY_INR_PIN = 23    # right relay / fan
+
+# Most cheap relay boards are active-LOW (a LOW signal turns the relay on).
+# Set to False if your board is active-HIGH.
+RELAY_ACTIVE_LOW = True
+
+# --- Timing ----------------------------------------------------------------
+READ_INTERVAL_S = 5       # seconds between sensor uploads
+WIFI_RETRY_DELAY_S = 5    # seconds to wait before retrying a failed request

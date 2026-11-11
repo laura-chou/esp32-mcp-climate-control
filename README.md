@@ -28,6 +28,9 @@ ESP32 ──HTTP POST /api/climate──▶ FastAPI ──SSE /api/stream──�
 ├── examples/
 │   ├── esp32_simulator.py      # 模擬 ESP32：上報資料 + 輪詢指令
 │   └── mcp_agent_consumer.py   # 模擬 MCP 核心：訂閱 SSE 並回推指令
+├── esp32/                      # ⚠️ ESP32 端 MicroPython 韌體（放到開發板上）
+│   ├── main.py                 # 讀 DHT22 → 上報 → 輪詢指令 → 控制繼電器
+│   └── config.py               # WiFi、PC IP、腳位設定（要先編輯）
 └── tests/
     └── test_transport.py       # pytest 測試（含真實 SSE 串流）
 ```
@@ -127,6 +130,49 @@ curl -X POST http://127.0.0.1:8801/api/fan/command \
 `device_id` 省略時會廣播給所有已知裝置。代理人下達指令後，規則引擎會暫時退讓
 （預設 60 秒，`AGENT_OVERRIDE_TTL_S`），避免兩者互相搶控；可用
 `POST /api/fan/auto?device_id=...` 立即交還控制權。
+
+## ESP32 端（MicroPython）
+
+`esp32/` 是要放到開發板上的韌體，**不是**在電腦上跑的。
+
+### 硬體接線
+
+| 元件 | ESP32 腳位 |
+| --- | --- |
+| DHT22 資料腳 | GPIO21 |
+| 繼電器 INL（左） | GPIO22 |
+| 繼電器 INR（右） | GPIO23 |
+
+兩個繼電器由同一道指令同步開關。多數廉價繼電器板是**低電位觸發**（LOW = 開）；
+若你的板子是**高電位觸發**，把 `config.py` 的 `RELAY_ACTIVE_LOW` 改成 `False`。
+
+### 部署步驟
+
+1. 編輯 `esp32/config.py`：
+   - `WIFI_SSID` / `WIFI_PASSWORD`
+   - `SERVER_HOST` 改成**跑 FastAPI 那台電腦的區網 IP**（例如 `192.168.0.100`）
+   - 若伺服器有設 `CLIMATE_AUTH_TOKEN`，把相同值填進 `DEVICE_TOKEN`
+
+2. 把兩個檔案上傳到 ESP32（以 `mpremote` 為例）：
+   ```bash
+   mpremote connect /dev/ttyUSB0 fs cp esp32/config.py :config.py
+   mpremote connect /dev/ttyUSB0 fs cp esp32/main.py   :main.py
+   mpremote connect /dev/ttyUSB0 reset
+   ```
+
+3. ESP32 開機後會自動執行：連 Wi-Fi → 每 5 秒讀 DHT22 並 `POST /api/climate` →
+   依回應與 `GET /api/fan/command` 的指令切換繼電器。
+
+> ⚠️ `SERVER_HOST` 不能填 `192.168.0.0` —— 那是網段位址，不是可連線的主機。
+> 要用電腦的實際 IP（Windows 用 `ipconfig`，Linux/macOS 用 `ip addr` 查）。
+
+### 通訊協定（與 PC 端一致）
+
+上報 body：
+```json
+{"device_id": "esp32-climate-01", "dht22_temperature": 31.2, "dht22_humidity": 55.0}
+```
+取得指令：`GET /api/fan/command?device_id=...&since_seq=...` → `{"command": "ON"|"OFF", ...}`
 
 ## 端到端試跑
 
