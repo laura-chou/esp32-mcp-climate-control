@@ -17,7 +17,7 @@ ESP32 ──HTTP POST /api/climate──▶ FastAPI ──SSE /api/stream──�
 ```
 .
 ├── main.py                     # 進入點：python main.py（監聽 0.0.0.0:8801）
-├── climate_agent.py            # 環境代理人：訂閱 SSE → Ollama 推理 → 回推指令
+├── climate_agent.py            # 環境代理人：訂閱 SSE →（規則決策 + Ollama 顧問）→ 回推指令
 ├── requirements.txt
 ├── pytest.ini
 ├── server/
@@ -199,8 +199,7 @@ python examples/esp32_simulator.py     # 3. 模擬 ESP32 上報
 ## 環境代理人（climate_agent.py）
 
 對應架構圖的 `climate_agent.py`。它訂閱 `/api/stream`，每收到一筆 `reading`
-就呼叫本機 Ollama 模型（Qwen2.5 / Llama3）判斷風扇 ON/OFF，再 `POST
-/api/fan/command` 回推：
+就依 `--mode` 決定風扇 ON/OFF，再 `POST /api/fan/command` 回推：
 
 ```
 /api/stream ──reading──▶ climate_agent ──prompt──▶ Ollama
@@ -211,9 +210,44 @@ python examples/esp32_simulator.py     # 3. 模擬 ESP32 上報
 ```bash
 # 前置：Ollama 執行中，且已拉取模型
 ollama serve &
-ollama pull qwen2.5
+ollama pull qwen2.5-coder:3b
 
-python climate_agent.py --model qwen2.5
+python climate_agent.py --model qwen2.5-coder:3b
+```
+
+### 為什麼預設不是「讓模型決定」？
+
+小模型（如 `qwen2.5-coder:3b`）**不擅長精確的數值比較**，會出現兩種典型症狀：
+
+1. **理由幻覺**：讀值明明是 T=28.0 / H=68.0，卻生成「humidity is below 65%」
+   這種與數據矛盾的說明——因為 LLM 是在「生成聽起來合理的句子」，不是真的在比大小。
+2. **邊界震盪**：28.0 °C 剛好卡在 `temp_on_c=28`，模型每次取樣都可能翻面，且
+   本身沒有遲滯（hysteresis），於是上一秒 ON、下一秒 OFF。
+
+因此本專案把**「決策」與「說明」分開**：
+
+- **決策**交給確定性的 `server/rules.py`（含遲滯，永不與數字矛盾）。
+- **理由**一律由程式依真實讀值生成（`Agent._describe`），模型寫的自由文字
+  **絕不會**成為正式理由。
+
+### 三種模式（`--mode`）
+
+| 模式 | 誰決定 ON/OFF | 是否呼叫模型 | 適用 |
+| --- | --- | --- | --- |
+| `advisor`（預設） | 規則引擎 | 是（僅顧問，記錄建議與是否同意） | 小模型；保留 LLM 觀察性 |
+| `rules` | 規則引擎 | 否 | 最穩定、零延遲；不想依賴 LLM |
+| `llm` | 模型 | 是 | 換成能力較強的模型時 |
+
+```bash
+python climate_agent.py --mode advisor   # 預設：規則決策 + 模型顧問
+python climate_agent.py --mode rules     # 純規則，不呼叫模型
+python climate_agent.py --mode llm --model qwen2.5:14b   # 讓較強模型決策
+```
+
+`advisor` 模式的輸出會同時顯示模型建議與是否同意，方便觀察：
+
+```
+[DECIDE] esp32-climate-01 T=28.0 H=68.0 -> ON (rule-engine: temperature crossed threshold (T=28.0C, H=68.0%)) | llm DISAGREES: OFF (temperature is above comfort range)
 ```
 
 常用參數：
@@ -222,19 +256,22 @@ python climate_agent.py --model qwen2.5
 | --- | --- | --- |
 | `--base` | `http://127.0.0.1:8801` | 傳輸層位址 |
 | `--ollama` | `http://127.0.0.1:11434` | Ollama 位址 |
-| `--model` | `qwen2.5` | 模型名稱 |
+| `--model` | `qwen2.5-coder:3b` | 模型名稱 |
+| `--mode` | `advisor` | `advisor` / `rules` / `llm` |
 | `--token` | 無 | 對應伺服器的 `CLIMATE_AUTH_TOKEN` |
 | `--min-switch-seconds` | `15` | 非緊急情況下兩次切換的最短間隔（防抖） |
 | `--dry-run` | 關 | 只印決策、不推送指令 |
 
 **設計重點**
 
-- **模型回傳 JSON**：要求模型輸出 `{"command":"ON|OFF","reason":"..."}`，並用
-  `format=json` 約束；解析失敗即視為無效。
-- **規則後備**：Ollama 連不上或回傳無法解析時，自動改用 `server/rules.py`
-  的遲滯規則，確保迴圈不中斷。
+- **決策與說明分離**：`rules` / `advisor` 模式由 `server/rules.py` 決策；
+  正式 `reason` 由程式依真實數字生成，杜絕「理由與數據矛盾」。
+- **模型僅顧問**：`advisor` 仍呼叫模型並記錄其建議（含 `agrees` / `DISAGREES`），
+  但模型的 command 不會成為正式指令。
+- **`llm` 模式的雙重保險**：即使讓模型決策，正式理由仍由程式生成；解析失敗或
+  連線錯誤時自動退回規則引擎。
 - **防抖護欄**：除非讀值明顯偏離舒適帶（緊急），否則兩次切換需間隔
-  `--min-switch-seconds`，避免模型抖動造成繼電器狂切。
+  `--min-switch-seconds`，避免抖動造成繼電器狂切。
 - **斷線重連**：SSE 串流中斷時以指數退避自動重連。
 
 ## 結構化日誌
@@ -283,7 +320,7 @@ pytest
 
 涵蓋：上報與規則決策、遲滯行為、輸入驗證、代理人覆寫、輪詢 / long-poll、
 真實 SSE 串流（以 uvicorn 實跑）、token 驗證、健康與狀態端點，以及
-`climate_agent` 的決策解析、Ollama 後備與防抖護欄。
+`climate_agent` 的決策模式（`advisor` / `rules` / `llm`）、理由生成、JSON 解析與防抖護欄。
 
 ## 後續整合（尚未實作）
 
