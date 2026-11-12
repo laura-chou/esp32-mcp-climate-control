@@ -1,7 +1,7 @@
 """Pydantic schemas shared between the ESP32 edge and the MCP core.
 
 Field names follow the architecture spec: the ESP32 sends
-``dht22_temperature`` and ``dht22_humidity`` inside a flat JSON body.
+``dht11_temperature`` and ``dht11_humidity`` inside a flat JSON body.
 """
 
 from __future__ import annotations
@@ -27,32 +27,31 @@ class FanState(str, Enum):
 class ClimateReading(BaseModel):
     """Incoming telemetry from the ESP32 DHT11 sensor.
 
-    Field names follow the wire protocol (``dht22_*``); the sensor itself is a
-    DHT11, so the validation window matches the DHT11 physical range.
+    The validation window matches the DHT11 physical range (0-50 C, 20-90 %).
     """
 
     model_config = ConfigDict(extra="allow", populate_by_name=True)
 
-    dht22_temperature: float = Field(..., description="Temperature in Celsius (DHT11)")
-    dht22_humidity: float = Field(..., description="Relative humidity in percent (DHT11)")
+    dht11_temperature: float = Field(..., description="Temperature in Celsius (DHT11)")
+    dht11_humidity: float = Field(..., description="Relative humidity in percent (DHT11)")
 
     device_id: str = Field("esp32-climate-01", description="Edge device identifier")
     timestamp: Optional[datetime] = Field(
         default=None, description="Device clock; server time is used when omitted"
     )
 
-    @field_validator("dht22_temperature")
+    @field_validator("dht11_temperature")
     @classmethod
     def _check_temperature(cls, value: float) -> float:
         if not 0.0 <= value <= 50.0:
-            raise ValueError("dht22_temperature out of DHT11 range (0..50 C)")
+            raise ValueError("dht11_temperature out of DHT11 range (0..50 C)")
         return value
 
-    @field_validator("dht22_humidity")
+    @field_validator("dht11_humidity")
     @classmethod
     def _check_humidity(cls, value: float) -> float:
         if not 20.0 <= value <= 90.0:
-            raise ValueError("dht22_humidity out of DHT11 range (20..90 %)")
+            raise ValueError("dht11_humidity out of DHT11 range (20..90 %)")
         return value
 
 
@@ -60,8 +59,8 @@ class ClimateReadingEnvelope(BaseModel):
     """A stored reading plus server-side metadata."""
 
     device_id: str
-    dht22_temperature: float
-    dht22_humidity: float
+    dht11_temperature: float
+    dht11_humidity: float
     received_at: datetime = Field(default_factory=_utcnow)
     device_timestamp: Optional[datetime] = None
 

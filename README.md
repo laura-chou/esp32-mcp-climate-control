@@ -67,7 +67,7 @@ python main.py
 ```bash
 curl -X POST http://127.0.0.1:8801/api/climate \
   -H 'Content-Type: application/json' \
-  -d '{"device_id":"esp32-climate-01","dht22_temperature":31.2,"dht22_humidity":55.0}'
+  -d '{"device_id":"esp32-climate-01","dht11_temperature":31.2,"dht11_humidity":55.0}'
 ```
 
 回應會附帶目前應套用的風扇指令，ESP32 可在同一次往返就取得結果：
@@ -75,12 +75,12 @@ curl -X POST http://127.0.0.1:8801/api/climate \
 ```json
 {
   "status": "ok",
-  "reading": {"device_id": "esp32-climate-01", "dht22_temperature": 31.2, "...": "..."},
+  "reading": {"device_id": "esp32-climate-01", "dht11_temperature": 31.2, "...": "..."},
   "fan_command": {"command": "ON", "reason": "temperature crossed threshold (T=31.2C, H=55.0%)", "source": "rule-engine", "seq": 1}
 }
 ```
 
-`dht22_temperature`（0~50 °C）與 `dht22_humidity`（20~90 %，DHT11 實體量測範圍）超出範圍會回 `422`。
+`dht11_temperature`（0~50 °C）與 `dht11_humidity`（20~90 %，DHT11 實體量測範圍）超出範圍會回 `422`。
 `device_id` 可省略，預設為 `esp32-climate-01`。
 
 ### 2. SSE 串流 — `GET /api/stream`
@@ -93,7 +93,7 @@ event: snapshot
 data: {"seq": 3, "readings": {...}}
 
 event: reading
-data: {"device_id": "esp32-climate-01", "dht22_temperature": 30.0, "dht22_humidity": 75.0, "...": "..."}
+data: {"device_id": "esp32-climate-01", "dht11_temperature": 30.0, "dht11_humidity": 75.0, "...": "..."}
 
 event: fan_command
 data: {"device_id": "esp32-climate-01", "command": "ON", "reason": "...", "source": "climate_agent", "seq": 4}
@@ -180,7 +180,7 @@ DHT11 的實體量測範圍為 **溫度 0~50 °C、濕度 20~90 %**。上電初�
 
 上報 body：
 ```json
-{"device_id": "esp32-climate-01", "dht22_temperature": 31.2, "dht22_humidity": 55.0}
+{"device_id": "esp32-climate-01", "dht11_temperature": 31.2, "dht11_humidity": 55.0}
 ```
 取得指令：`GET /api/fan/command?device_id=...&since_seq=...` → `{"command": "ON"|"OFF", ...}`
 
@@ -258,7 +258,7 @@ python climate_agent.py --model qwen2.5
 `422` 回應同時改為結構化格式，方便 ESP32 端或測試直接讀取錯誤欄位：
 
 ```json
-{"status": "error", "detail": [{"field": "body.dht22_temperature", "input": 99.0, "message": "...", "type": "..."}]}
+{"status": "error", "detail": [{"field": "body.dht11_temperature", "input": 99.0, "message": "...", "type": "..."}]}
 ```
 
 ## 設定（環境變數）

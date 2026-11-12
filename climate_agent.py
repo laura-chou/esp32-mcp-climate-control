@@ -144,8 +144,8 @@ class Agent:
         s = self._settings
         user = (
             f"device_id: {reading['device_id']}\n"
-            f"dht22_temperature: {reading['dht22_temperature']}\n"
-            f"dht22_humidity: {reading['dht22_humidity']}\n"
+            f"dht11_temperature: {reading['dht11_temperature']}\n"
+            f"dht11_humidity: {reading['dht11_humidity']}\n"
             f"current_fan: {current}\n"
             f"comfort_band_c: {s.temp_off_c}-{s.temp_on_c}\n"
             f"humidity_band_pct: {s.humidity_off}-{s.humidity_on}\n"
@@ -161,8 +161,8 @@ class Agent:
         the anti-flapping guard."""
 
         s = self._settings
-        temperature = reading["dht22_temperature"]
-        humidity = reading["dht22_humidity"]
+        temperature = reading["dht11_temperature"]
+        humidity = reading["dht11_humidity"]
         return (
             temperature >= s.temp_on_c + 3.0
             or humidity >= s.humidity_on + 5.0
@@ -171,8 +171,8 @@ class Agent:
 
     def _rule_fallback(self, reading: dict, current: str) -> Decision:
         state, reason = decide_fan(
-            reading["dht22_temperature"],
-            reading["dht22_humidity"],
+            reading["dht11_temperature"],
+            reading["dht11_humidity"],
             FanState(current),
             self._settings,
         )
@@ -282,8 +282,8 @@ def _handle_reading(
 ) -> None:
     decision = agent.decide(reading)
     print(
-        f"[DECIDE] {reading['device_id']} T={reading['dht22_temperature']} "
-        f"H={reading['dht22_humidity']} -> {decision.command} "
+        f"[DECIDE] {reading['device_id']} T={reading['dht11_temperature']} "
+        f"H={reading['dht11_humidity']} -> {decision.command} "
         f"({decision.source}: {decision.reason})",
         flush=True,
     )

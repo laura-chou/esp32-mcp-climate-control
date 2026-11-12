@@ -31,8 +31,8 @@ class FakeChat:
 def make_reading(temperature=30.0, humidity=55.0, device_id="esp32-climate-01"):
     return {
         "device_id": device_id,
-        "dht22_temperature": temperature,
-        "dht22_humidity": humidity,
+        "dht11_temperature": temperature,
+        "dht11_humidity": humidity,
     }
 
 

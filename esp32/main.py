@@ -120,8 +120,8 @@ def read_sensor():
 def post_reading(temperature, humidity):
     payload = {
         "device_id": DEVICE_ID,
-        "dht22_temperature": round(temperature, 1),
-        "dht22_humidity": round(humidity, 1),
+        "dht11_temperature": round(temperature, 1),
+        "dht11_humidity": round(humidity, 1),
     }
     response = urequests.post(
         base_url() + "/api/climate",

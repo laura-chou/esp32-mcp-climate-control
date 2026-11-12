@@ -46,8 +46,8 @@ def main() -> None:
             humidity = round(random.uniform(40.0, 85.0), 1)
             payload = {
                 "device_id": args.device_id,
-                "dht22_temperature": temperature,
-                "dht22_humidity": humidity,
+                "dht11_temperature": temperature,
+                "dht11_humidity": humidity,
             }
             try:
                 resp = client.post(f"{args.base}/api/climate", json=payload, timeout=10.0)

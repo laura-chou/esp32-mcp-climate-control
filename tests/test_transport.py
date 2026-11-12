@@ -72,14 +72,14 @@ async def test_ingest_returns_ack_and_rule_command(app):
             "/api/climate",
             json={
                 "device_id": "esp32-climate-01",
-                "dht22_temperature": 31.5,
-                "dht22_humidity": 55.0,
+                "dht11_temperature": 31.5,
+                "dht11_humidity": 55.0,
             },
         )
     assert resp.status_code == 201
     body = resp.json()
     assert body["status"] == "ok"
-    assert body["reading"]["dht22_temperature"] == 31.5
+    assert body["reading"]["dht11_temperature"] == 31.5
     # 31.5C is above the 28C ON threshold -> rule engine turns the fan ON.
     assert body["fan_command"]["command"] == "ON"
     assert body["fan_command"]["source"] == "rule-engine"
@@ -91,18 +91,18 @@ async def test_hysteresis_keeps_fan_on_between_thresholds(app):
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         hot = await client.post(
             "/api/climate",
-            json={"dht22_temperature": 30.0, "dht22_humidity": 50.0},
+            json={"dht11_temperature": 30.0, "dht11_humidity": 50.0},
         )
         assert hot.json()["fan_command"]["command"] == "ON"
         # 27C is below ON (28) but above OFF (26): must stay ON.
         warm = await client.post(
             "/api/climate",
-            json={"dht22_temperature": 27.0, "dht22_humidity": 50.0},
+            json={"dht11_temperature": 27.0, "dht11_humidity": 50.0},
         )
         assert warm.json()["fan_command"]["command"] == "ON"
         cool = await client.post(
             "/api/climate",
-            json={"dht22_temperature": 25.0, "dht22_humidity": 50.0},
+            json={"dht11_temperature": 25.0, "dht11_humidity": 50.0},
         )
         assert cool.json()["fan_command"]["command"] == "OFF"
 
@@ -113,7 +113,7 @@ async def test_validation_rejects_out_of_range(app):
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         resp = await client.post(
             "/api/climate",
-            json={"dht22_temperature": 500.0, "dht22_humidity": 50.0},
+            json={"dht11_temperature": 500.0, "dht11_humidity": 50.0},
         )
     assert resp.status_code == 422
 
@@ -127,24 +127,24 @@ async def test_dht11_range_boundaries(app):
         # Exactly on the boundaries -> accepted.
         ok = await client.post(
             "/api/climate",
-            json={"dht22_temperature": 0.0, "dht22_humidity": 20.0},
+            json={"dht11_temperature": 0.0, "dht11_humidity": 20.0},
         )
         assert ok.status_code == 201
         ok = await client.post(
             "/api/climate",
-            json={"dht22_temperature": 50.0, "dht22_humidity": 90.0},
+            json={"dht11_temperature": 50.0, "dht11_humidity": 90.0},
         )
         assert ok.status_code == 201
 
-        # Just outside the DHT11 window -> rejected (values a DHT22 would accept).
+        # Just outside the DHT11 window -> rejected.
         too_cold = await client.post(
             "/api/climate",
-            json={"dht22_temperature": -5.0, "dht22_humidity": 50.0},
+            json={"dht11_temperature": -5.0, "dht11_humidity": 50.0},
         )
         assert too_cold.status_code == 422
         too_dry = await client.post(
             "/api/climate",
-            json={"dht22_temperature": 25.0, "dht22_humidity": 10.0},
+            json={"dht11_temperature": 25.0, "dht11_humidity": 10.0},
         )
         assert too_dry.status_code == 422
 
@@ -155,13 +155,13 @@ async def test_validation_error_lists_field_and_value(app):
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         resp = await client.post(
             "/api/climate",
-            json={"dht22_temperature": 99.0, "dht22_humidity": 50.0},
+            json={"dht11_temperature": 99.0, "dht11_humidity": 50.0},
         )
     assert resp.status_code == 422
     body = resp.json()
     assert body["status"] == "error"
     # The structured detail names the offending field and echoes the input.
-    entry = next(item for item in body["detail"] if "dht22_temperature" in item["field"])
+    entry = next(item for item in body["detail"] if "dht11_temperature" in item["field"])
     assert entry["input"] == 99.0
 
 
@@ -184,7 +184,7 @@ async def test_agent_command_overrides_rule_engine(app):
         # A hot reading must NOT flip the fan back on while the agent owns it.
         resp = await client.post(
             "/api/climate",
-            json={"dht22_temperature": 35.0, "dht22_humidity": 50.0},
+            json={"dht11_temperature": 35.0, "dht11_humidity": 50.0},
         )
         assert resp.json()["fan_command"]["command"] == "OFF"
 
@@ -230,7 +230,7 @@ def test_sse_stream_emits_snapshot_then_reading(live_server):
                         # Trigger a reading once the subscriber is attached.
                         client.post(
                             f"{live_server}/api/climate",
-                            json={"dht22_temperature": 29.0, "dht22_humidity": 60.0},
+                            json={"dht11_temperature": 29.0, "dht11_humidity": 60.0},
                         )
                     elif event == "reading":
                         break
@@ -239,7 +239,7 @@ def test_sse_stream_emits_snapshot_then_reading(live_server):
     assert "snapshot" in names
     assert "reading" in names
     reading = next(data for name, data in events if name == "reading")
-    assert reading["dht22_temperature"] == 29.0
+    assert reading["dht11_temperature"] == 29.0
 
 
 @pytest.mark.asyncio
@@ -249,12 +249,12 @@ async def test_auth_token_required_when_configured():
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         denied = await client.post(
             "/api/climate",
-            json={"dht22_temperature": 25.0, "dht22_humidity": 50.0},
+            json={"dht11_temperature": 25.0, "dht11_humidity": 50.0},
         )
         assert denied.status_code == 401
         allowed = await client.post(
             "/api/climate",
-            json={"dht22_temperature": 25.0, "dht22_humidity": 50.0},
+            json={"dht11_temperature": 25.0, "dht11_humidity": 50.0},
             headers={"X-Device-Token": "secret"},
         )
         assert allowed.status_code == 201
@@ -266,7 +266,7 @@ async def test_health_and_status(app):
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         await client.post(
             "/api/climate",
-            json={"dht22_temperature": 26.0, "dht22_humidity": 50.0},
+            json={"dht11_temperature": 26.0, "dht11_humidity": 50.0},
         )
         health = await client.get("/api/health")
         assert health.json()["status"] == "ok"

@@ -97,8 +97,8 @@ class ClimateHub:
 
         envelope = ClimateReadingEnvelope(
             device_id=reading.device_id,
-            dht22_temperature=reading.dht22_temperature,
-            dht22_humidity=reading.dht22_humidity,
+            dht11_temperature=reading.dht11_temperature,
+            dht11_humidity=reading.dht11_humidity,
             device_timestamp=reading.timestamp,
         )
         self._readings[reading.device_id] = envelope
@@ -142,8 +142,8 @@ class ClimateHub:
     ) -> Optional[FanCommand]:
         current = self._fan_commands.get(envelope.device_id)
         desired, reason = decide_fan(
-            envelope.dht22_temperature,
-            envelope.dht22_humidity,
+            envelope.dht11_temperature,
+            envelope.dht11_humidity,
             current.command if current else None,
             self._settings,
         )
@@ -152,8 +152,8 @@ class ClimateHub:
         logger.info(
             "rule-engine device=%s T=%.1fC H=%.1f%% -> %s (%s)",
             envelope.device_id,
-            envelope.dht22_temperature,
-            envelope.dht22_humidity,
+            envelope.dht11_temperature,
+            envelope.dht11_humidity,
             desired.value,
             reason,
         )

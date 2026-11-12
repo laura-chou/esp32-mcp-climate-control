@@ -28,8 +28,8 @@ def decide_with_placeholder_agent(reading: dict) -> tuple[str, str]:
     the model's ON/OFF decision plus a short rationale.
     """
 
-    temperature = reading["dht22_temperature"]
-    humidity = reading["dht22_humidity"]
+    temperature = reading["dht11_temperature"]
+    humidity = reading["dht11_humidity"]
     if temperature >= 29.0 or humidity >= 72.0:
         return "ON", f"agent: T={temperature:.1f}C H={humidity:.1f}% -> cool/dry"
     if temperature <= 25.5 and humidity <= 60.0:
@@ -56,8 +56,8 @@ def main() -> None:
                     continue
                 data = json.loads(line.split(":", 1)[1].strip())
                 if event_name == "reading":
-                    print(f"[READ] {data['device_id']} T={data['dht22_temperature']} "
-                          f"H={data['dht22_humidity']}")
+                    print(f"[READ] {data['device_id']} T={data['dht11_temperature']} "
+                          f"H={data['dht11_humidity']}")
                     command, reason = decide_with_placeholder_agent(data)
                     resp = client.post(
                         f"{args.base}/api/fan/command",
