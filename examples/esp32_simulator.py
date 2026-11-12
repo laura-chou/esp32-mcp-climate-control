@@ -4,7 +4,7 @@ Run the server first, then:
 
     python examples/esp32_simulator.py
 
-It POSTs a synthetic DHT22 reading every few seconds and polls
+It POSTs a synthetic DHT11 reading every few seconds and polls
 ``/api/fan/command`` (with long-polling) to display the fan state.
 """
 

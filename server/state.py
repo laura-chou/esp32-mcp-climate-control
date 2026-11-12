@@ -11,6 +11,7 @@ broker (Redis, MQTT) are required for the first iteration.
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Optional
@@ -23,6 +24,8 @@ from .models import (
     FanState,
 )
 from .rules import decide_fan
+
+logger = logging.getLogger("climate.hub")
 
 
 def _utcnow() -> datetime:
@@ -57,10 +60,12 @@ class ClimateHub:
     def subscribe(self, maxsize: int = 100) -> asyncio.Queue[dict[str, Any]]:
         queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=maxsize)
         self._subscribers.add(queue)
+        logger.info("SSE subscriber connected; total=%d", len(self._subscribers))
         return queue
 
     def unsubscribe(self, queue: asyncio.Queue[dict[str, Any]]) -> None:
         self._subscribers.discard(queue)
+        logger.info("SSE subscriber disconnected; total=%d", len(self._subscribers))
 
     @property
     def subscriber_count(self) -> int:
@@ -103,7 +108,17 @@ class ClimateHub:
         command: Optional[FanCommand] = None
         if self._is_auto(reading.device_id):
             command = await self._apply_rule_engine(envelope)
+        else:
+            logger.info(
+                "device=%s is under agent control; rule engine skipped",
+                reading.device_id,
+            )
         return envelope, command
+
+    def control_mode(self, device_id: str) -> str:
+        """Return ``"auto"`` or ``"agent"`` for the given device."""
+
+        return "auto" if self._is_auto(device_id) else "agent"
 
     def _is_auto(self, device_id: str) -> bool:
         """True when the rule engine (not the agent) owns this device."""
@@ -114,6 +129,11 @@ class ClimateHub:
         ttl = self._settings.agent_override_ttl_s
         if ttl > 0 and (_utcnow() - since).total_seconds() > ttl:
             self._agent_control.pop(device_id, None)
+            logger.info(
+                "device=%s agent override expired after %.0fs; back to auto",
+                device_id,
+                ttl,
+            )
             return True
         return False
 
@@ -129,6 +149,14 @@ class ClimateHub:
         )
         if current is not None and current.command is desired:
             return current
+        logger.info(
+            "rule-engine device=%s T=%.1fC H=%.1f%% -> %s (%s)",
+            envelope.device_id,
+            envelope.dht22_temperature,
+            envelope.dht22_humidity,
+            desired.value,
+            reason,
+        )
         return await self.set_fan_command(
             device_id=envelope.device_id,
             command=desired,
@@ -165,6 +193,14 @@ class ClimateHub:
             "fan_command",
             {"device_id": device_id, **record.model_dump(mode="json")},
         )
+        logger.info(
+            "fan command device=%s -> %s source=%s seq=%d reason=%s",
+            device_id,
+            record.command.value,
+            record.source,
+            record.seq,
+            record.reason or "-",
+        )
         return record
 
     async def broadcast_fan_command(
@@ -182,6 +218,13 @@ class ClimateHub:
         targets = set(self._readings) | set(self._fan_commands)
         if not targets:
             targets = {"esp32-climate-01"}
+        logger.info(
+            "broadcast fan command=%s source=%s to %d device(s): %s",
+            command.value,
+            source,
+            len(targets),
+            ", ".join(sorted(targets)),
+        )
         last: Optional[FanCommand] = None
         for target in sorted(targets):
             last = await self.set_fan_command(target, command, reason, source)
@@ -194,7 +237,11 @@ class ClimateHub:
     def reset_to_auto(self, device_id: str) -> bool:
         """Hand control back to the rule engine. Returns True if it was agent-owned."""
 
-        return self._agent_control.pop(device_id, None) is not None
+        was_agent = self._agent_control.pop(device_id, None) is not None
+        logger.info(
+            "device=%s reset to auto (was_agent_controlled=%s)", device_id, was_agent
+        )
+        return was_agent
 
     async def wait_for_fan_command(
         self, device_id: str, since_seq: int, timeout: float
@@ -210,6 +257,12 @@ class ClimateHub:
 
             remaining = deadline - loop.time()
             if remaining <= 0:
+                logger.info(
+                    "long-poll device=%s since_seq=%d timed out after %.0fs",
+                    device_id,
+                    since_seq,
+                    timeout,
+                )
                 return current
 
             async with self._fan_condition:
@@ -220,7 +273,22 @@ class ClimateHub:
                 try:
                     await asyncio.wait_for(self._fan_condition.wait(), timeout=remaining)
                 except asyncio.TimeoutError:
+                    logger.info(
+                        "long-poll device=%s since_seq=%d timed out after %.0fs",
+                        device_id,
+                        since_seq,
+                        timeout,
+                    )
                     return self._fan_commands.get(device_id)
+                current = self._fan_commands.get(device_id)
+                if current is not None and current.seq > since_seq:
+                    logger.info(
+                        "long-poll device=%s woken by seq=%d (was_seq=%d)",
+                        device_id,
+                        current.seq,
+                        since_seq,
+                    )
+                    return current
 
     # ------------------------------------------------------------------
     # Introspection

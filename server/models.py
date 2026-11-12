@@ -25,12 +25,16 @@ class FanState(str, Enum):
 
 
 class ClimateReading(BaseModel):
-    """Incoming telemetry from the ESP32 DHT22 sensor."""
+    """Incoming telemetry from the ESP32 DHT11 sensor.
+
+    Field names follow the wire protocol (``dht22_*``); the sensor itself is a
+    DHT11, so the validation window matches the DHT11 physical range.
+    """
 
     model_config = ConfigDict(extra="allow", populate_by_name=True)
 
-    dht22_temperature: float = Field(..., description="Temperature in Celsius")
-    dht22_humidity: float = Field(..., description="Relative humidity in percent")
+    dht22_temperature: float = Field(..., description="Temperature in Celsius (DHT11)")
+    dht22_humidity: float = Field(..., description="Relative humidity in percent (DHT11)")
 
     device_id: str = Field("esp32-climate-01", description="Edge device identifier")
     timestamp: Optional[datetime] = Field(
@@ -40,15 +44,15 @@ class ClimateReading(BaseModel):
     @field_validator("dht22_temperature")
     @classmethod
     def _check_temperature(cls, value: float) -> float:
-        if not -40.0 <= value <= 80.0:
-            raise ValueError("dht22_temperature out of DHT22 range (-40..80 C)")
+        if not 0.0 <= value <= 50.0:
+            raise ValueError("dht22_temperature out of DHT11 range (0..50 C)")
         return value
 
     @field_validator("dht22_humidity")
     @classmethod
     def _check_humidity(cls, value: float) -> float:
-        if not 0.0 <= value <= 100.0:
-            raise ValueError("dht22_humidity out of range (0..100 %)")
+        if not 20.0 <= value <= 90.0:
+            raise ValueError("dht22_humidity out of DHT11 range (20..90 %)")
         return value
 
 

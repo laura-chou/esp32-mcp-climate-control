@@ -20,6 +20,7 @@ from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator, Optional
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, status
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from sse_starlette.sse import EventSourceResponse
 
@@ -39,6 +40,14 @@ logger = logging.getLogger("climate.transport")
 def create_app(settings: Optional[Settings] = None) -> FastAPI:
     settings = settings or default_settings
     hub = ClimateHub(settings)
+
+    def client_ip(request: Request) -> str:
+        """Best-effort source IP, honouring a reverse proxy's X-Forwarded-For."""
+
+        forwarded = request.headers.get("x-forwarded-for")
+        if forwarded:
+            return forwarded.split(",")[0].strip()
+        return request.client.host if request.client else "unknown"
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -64,6 +73,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     # Optional shared-token guard
     # ------------------------------------------------------------------
     async def require_token(
+        request: Request,
         x_device_token: Optional[str] = Header(default=None),
         token: Optional[str] = Query(default=None),
     ) -> None:
@@ -71,6 +81,13 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         if not expected:
             return
         if (x_device_token or token) != expected:
+            logger.warning(
+                "401 unauthorized from %s on %s %s (token %s)",
+                client_ip(request),
+                request.method,
+                request.url.path,
+                "present but invalid" if (x_device_token or token) else "missing",
+            )
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="missing or invalid device token",
@@ -83,10 +100,11 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         "/api/climate",
         response_model=IngestAck,
         status_code=status.HTTP_201_CREATED,
-        summary="Ingest a DHT22 reading from the ESP32",
+        summary="Ingest a DHT11 reading from the ESP32",
     )
     async def ingest_climate(
         reading: ClimateReading,
+        request: Request,
         _: None = Depends(require_token),
     ) -> IngestAck:
         envelope, command = await hub.record_reading(reading)
@@ -97,11 +115,14 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                 reading.device_id, FanState.OFF, "initial state", "rule-engine"
             )
         logger.info(
-            "ingest device=%s T=%.1fC H=%.1f%% -> fan=%s",
+            "ingest from %s device=%s T=%.1fC H=%.1f%% mode=%s -> fan=%s (source=%s)",
+            client_ip(request),
             reading.device_id,
             reading.dht22_temperature,
             reading.dht22_humidity,
+            hub.control_mode(reading.device_id),
             current.command.value,
+            current.source,
         )
         return IngestAck(reading=envelope, fan_command=current)
 
@@ -110,7 +131,11 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     # ------------------------------------------------------------------
     @app.get("/api/stream", summary="Server-Sent Events stream")
     async def stream(request: Request) -> EventSourceResponse:
+        peer = client_ip(request)
         queue = hub.subscribe()
+        logger.info(
+            "SSE stream opened by %s; subscribers=%d", peer, hub.subscriber_count
+        )
 
         async def event_generator() -> AsyncIterator[dict[str, Any]]:
             try:
@@ -157,6 +182,9 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         _: None = Depends(require_token),
     ) -> FanCommand:
         if wait == 1:
+            logger.debug(
+                "long-poll start device=%s since_seq=%d", device_id, since_seq
+            )
             command = await hub.wait_for_fan_command(
                 device_id, since_seq, settings.long_poll_timeout_s
             )
@@ -167,6 +195,14 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             command = await hub.set_fan_command(
                 device_id, FanState.OFF, "no reading yet", "rule-engine"
             )
+        logger.info(
+            "poll device=%s wait=%d since_seq=%d -> %s seq=%d",
+            device_id,
+            wait,
+            since_seq,
+            command.command.value,
+            command.seq,
+        )
         return command
 
     @app.post(
@@ -176,13 +212,16 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     )
     async def post_fan_command(
         body: FanCommandRequest,
+        request: Request,
         _: None = Depends(require_token),
     ) -> FanCommand:
         logger.info(
-            "agent command=%s device=%s reason=%s",
-            body.command.value,
+            "incoming command from %s: device=%s command=%s source=%s reason=%s",
+            client_ip(request),
             body.device_id or "*",
-            body.reason,
+            body.command.value,
+            body.source,
+            body.reason or "-",
         )
         return await hub.broadcast_fan_command(
             command=body.command,
@@ -200,6 +239,9 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         _: None = Depends(require_token),
     ) -> dict[str, Any]:
         was_agent = hub.reset_to_auto(device_id)
+        logger.info(
+            "fan auto reset device=%s was_agent_controlled=%s", device_id, was_agent
+        )
         return {"status": "ok", "device_id": device_id, "was_agent_controlled": was_agent}
 
     # ------------------------------------------------------------------
@@ -239,8 +281,48 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             "devices": readings,
         }
 
+    @app.exception_handler(RequestValidationError)
+    async def validation_error_handler(
+        request: Request, exc: RequestValidationError
+    ) -> JSONResponse:
+        # Log the offending fields and values so a bad ESP32 payload is
+        # debuggable from the server terminal, not just "422".
+        errors = exc.errors()
+        detail = []
+        for err in errors:
+            location = ".".join(str(part) for part in err.get("loc", ()))
+            detail.append(
+                {
+                    "field": location,
+                    "input": err.get("input"),
+                    "message": err.get("msg"),
+                    "type": err.get("type"),
+                }
+            )
+        logger.warning(
+            "422 invalid payload from %s on %s %s: %s",
+            client_ip(request),
+            request.method,
+            request.url.path,
+            "; ".join(
+                f"{item['field']}={item['input']!r} ({item['message']})"
+                for item in detail
+            ),
+        )
+        return JSONResponse(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            content={"status": "error", "detail": detail},
+        )
+
     @app.exception_handler(ValueError)
-    async def value_error_handler(_: Request, exc: ValueError) -> JSONResponse:
+    async def value_error_handler(request: Request, exc: ValueError) -> JSONResponse:
+        logger.error(
+            "422 domain error from %s on %s %s: %s",
+            client_ip(request),
+            request.method,
+            request.url.path,
+            exc,
+        )
         return JSONResponse(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             content={"status": "error", "detail": str(exc)},

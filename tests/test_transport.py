@@ -119,6 +119,53 @@ async def test_validation_rejects_out_of_range(app):
 
 
 @pytest.mark.asyncio
+async def test_dht11_range_boundaries(app):
+    """DHT11 window: 0..50 C and 20..90 % RH (inclusive)."""
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        # Exactly on the boundaries -> accepted.
+        ok = await client.post(
+            "/api/climate",
+            json={"dht22_temperature": 0.0, "dht22_humidity": 20.0},
+        )
+        assert ok.status_code == 201
+        ok = await client.post(
+            "/api/climate",
+            json={"dht22_temperature": 50.0, "dht22_humidity": 90.0},
+        )
+        assert ok.status_code == 201
+
+        # Just outside the DHT11 window -> rejected (values a DHT22 would accept).
+        too_cold = await client.post(
+            "/api/climate",
+            json={"dht22_temperature": -5.0, "dht22_humidity": 50.0},
+        )
+        assert too_cold.status_code == 422
+        too_dry = await client.post(
+            "/api/climate",
+            json={"dht22_temperature": 25.0, "dht22_humidity": 10.0},
+        )
+        assert too_dry.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_validation_error_lists_field_and_value(app):
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post(
+            "/api/climate",
+            json={"dht22_temperature": 99.0, "dht22_humidity": 50.0},
+        )
+    assert resp.status_code == 422
+    body = resp.json()
+    assert body["status"] == "error"
+    # The structured detail names the offending field and echoes the input.
+    entry = next(item for item in body["detail"] if "dht22_temperature" in item["field"])
+    assert entry["input"] == 99.0
+
+
+@pytest.mark.asyncio
 async def test_agent_command_overrides_rule_engine(app):
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:

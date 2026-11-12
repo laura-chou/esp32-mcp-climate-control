@@ -1,11 +1,14 @@
 """ESP32 MicroPython firmware for the climate-control system.
 
-Reads a DHT22 sensor and drives two relay outputs (INL / INR) based on fan
+Reads a DHT11 sensor and drives two relay outputs (INL / INR) based on fan
 commands from the PC transport layer:
 
     POST /api/climate       upload the reading; the response carries the
                             current fan command
     GET  /api/fan/command   poll for a fan command
+
+Readings outside the DHT11 physical range are treated as sensor noise and
+dropped before upload, so a garbled value never reaches the server.
 
 Edit config.py first, then copy both files onto the board.
 """
@@ -21,6 +24,10 @@ import urequests
 from config import (
     DEVICE_ID,
     DEVICE_TOKEN,
+    DHT11_HUMIDITY_MAX,
+    DHT11_HUMIDITY_MIN,
+    DHT11_TEMP_MAX_C,
+    DHT11_TEMP_MIN_C,
     DHT_PIN,
     READ_INTERVAL_S,
     RELAY_ACTIVE_LOW,
@@ -33,7 +40,7 @@ from config import (
     WIFI_SSID,
 )
 
-sensor = dht.DHT22(machine.Pin(DHT_PIN))
+sensor = dht.DHT11(machine.Pin(DHT_PIN))
 relay_inl = machine.Pin(RELAY_INL_PIN, machine.Pin.OUT)
 relay_inr = machine.Pin(RELAY_INR_PIN, machine.Pin.OUT)
 
@@ -73,13 +80,40 @@ def set_fan(on):
     relay_inr.value(level)
 
 
+def reading_is_valid(temperature, humidity):
+    """Reject DHT11 bit errors / disconnected-sensor noise.
+
+    The DHT11 only reports 0-50 C and 20-90 % RH; anything outside that window
+    (or a NaN) is a bad read and must not be uploaded.
+    """
+
+    if temperature is None or humidity is None:
+        return False
+    if not DHT11_TEMP_MIN_C <= temperature <= DHT11_TEMP_MAX_C:
+        return False
+    if not DHT11_HUMIDITY_MIN <= humidity <= DHT11_HUMIDITY_MAX:
+        return False
+    return True
+
+
 def read_sensor():
+    """Return a validated ``(temperature, humidity)`` or ``None``."""
+
     for _ in range(3):
         try:
             sensor.measure()
-            return sensor.temperature(), sensor.humidity()
+            temperature = sensor.temperature()
+            humidity = sensor.humidity()
         except OSError:
             time.sleep(1)
+            continue
+
+        if reading_is_valid(temperature, humidity):
+            return temperature, humidity
+
+        print("discarding out-of-range read: T={} C H={} %".format(temperature, humidity))
+        time.sleep(1)
+
     return None
 
 
@@ -130,7 +164,7 @@ def main():
                 ack = post_reading(reading[0], reading[1])
                 last_seq = apply_command(ack["fan_command"])
             else:
-                print("sensor read failed")
+                print("no valid sensor reading; skipping upload")
 
             command = poll_command(last_seq)
             last_seq = apply_command(command)

@@ -3,7 +3,7 @@
 ESP32 + MCP + Ollama 本機氣候控制系統。
 
 本 repo 目前實作了架構圖中 **「本機電腦（PC）傳輸層」** 的部分：
-FastAPI 伺服器（Port 8801），負責接收 ESP32 上報的 DHT22 溫溼度資料、
+FastAPI 伺服器（Port 8801），負責接收 ESP32 上報的 DHT11 溫溼度資料、
 以 SSE 即時推播給 MCP 核心 / `climate_agent.py`，並提供風扇指令的下行通道。
 
 ```
@@ -30,7 +30,7 @@ ESP32 ──HTTP POST /api/climate──▶ FastAPI ──SSE /api/stream──�
 │   ├── esp32_simulator.py      # 模擬 ESP32：上報資料 + 輪詢指令
 │   └── mcp_agent_consumer.py   # 精簡版 MCP 消費者（佔位決策，示範用）
 ├── esp32/                      # ⚠️ ESP32 端 MicroPython 韌體（放到開發板上）
-│   ├── main.py                 # 讀 DHT22 → 上報 → 輪詢指令 → 控制繼電器
+│   ├── main.py                 # 讀 DHT11 → 上報 → 輪詢指令 → 控制繼電器
 │   └── config.py               # WiFi、PC IP、腳位設定（要先編輯）
 └── tests/
     ├── test_transport.py       # pytest 測試（含真實 SSE 串流）
@@ -80,7 +80,7 @@ curl -X POST http://127.0.0.1:8801/api/climate \
 }
 ```
 
-`dht22_temperature`（-40~80 °C）與 `dht22_humidity`（0~100 %）超出範圍會回 `422`。
+`dht22_temperature`（0~50 °C）與 `dht22_humidity`（20~90 %，DHT11 實體量測範圍）超出範圍會回 `422`。
 `device_id` 可省略，預設為 `esp32-climate-01`。
 
 ### 2. SSE 串流 — `GET /api/stream`
@@ -141,7 +141,7 @@ curl -X POST http://127.0.0.1:8801/api/fan/command \
 
 | 元件 | ESP32 腳位 |
 | --- | --- |
-| DHT22 資料腳 | GPIO21 |
+| DHT11 資料腳 | GPIO21 |
 | 繼電器 INL（左） | GPIO22 |
 | 繼電器 INR（右） | GPIO23 |
 
@@ -162,11 +162,19 @@ curl -X POST http://127.0.0.1:8801/api/fan/command \
    mpremote connect /dev/ttyUSB0 reset
    ```
 
-3. ESP32 開機後會自動執行：連 Wi-Fi → 每 5 秒讀 DHT22 並 `POST /api/climate` →
+3. ESP32 開機後會自動執行：連 Wi-Fi → 每 5 秒讀 DHT11 並 `POST /api/climate` →
    依回應與 `GET /api/fan/command` 的指令切換繼電器。
 
 > ⚠️ `SERVER_HOST` 不能填 `192.168.0.0` —— 那是網段位址，不是可連線的主機。
 > 要用電腦的實際 IP（Windows 用 `ipconfig`，Linux/macOS 用 `ip addr` 查）。
+
+### 讀值防呆（DHT11）
+
+DHT11 的實體量測範圍為 **溫度 0~50 °C、濕度 20~90 %**。上電初期、線路鬆脫或
+讀取時序干擾常會產生範圍外的亂碼；韌體在 `read_sensor()` 會先過濾（`reading_is_valid()`），
+超出範圍或 `NaN` 的讀值直接丟棄、重試，**不會上報**，因此也不會在後端觸發 `422`。
+範圍常數定義在 `esp32/config.py`（`DHT11_TEMP_MIN_C` 等），與 `server/models.py`
+的驗證範圍一致。
 
 ### 通訊協定（與 PC 端一致）
 
@@ -229,11 +237,36 @@ python climate_agent.py --model qwen2.5
   `--min-switch-seconds`，避免模型抖動造成繼電器狂切。
 - **斷線重連**：SSE 串流中斷時以指數退避自動重連。
 
+## 結構化日誌
+
+伺服器使用標準 `logging`（logger 名稱 `climate.transport`、`climate.hub`、
+`climate.main`），啟動時即可從終端機追蹤資料流。日誌等級可用環境變數
+`CLIMATE_LOG_LEVEL`（預設 `INFO`）調整。
+
+| 事件 | 等級 | 內容 |
+| --- | --- | --- |
+| `POST /api/climate` | INFO | 來源 IP、`device_id`、溫溼度、控制模式（`auto` / `agent`）、最終風扇指令與來源 |
+| 驗證失敗 `422` | WARNING | 逐欄列出錯誤欄位、輸入值、訊息與來源 IP（結構化 `detail`） |
+| 未授權 `401` | WARNING | 來源 IP、方法、路徑、token 是缺漏或無效 |
+| 網域錯誤 `ValueError` | ERROR | 來源 IP、方法、路徑與錯誤訊息 |
+| `GET /api/stream` | INFO | 訂閱者連線建立 / 斷線，以及目前線上訂閱者總數 |
+| `GET /api/fan/command` | INFO | 輪詢 / long-poll 結果（含逾時與被喚醒事件） |
+| `POST /api/fan/command` | INFO | 來源 IP、目標裝置、指令、`source`、`reason` |
+| `POST /api/fan/auto` | INFO | 重置裝置與是否原本為代理人控制 |
+| 規則引擎決策 | INFO | 讀值、決策與原因；代理人覆寫期間會記錄「跳過規則引擎」 |
+
+`422` 回應同時改為結構化格式，方便 ESP32 端或測試直接讀取錯誤欄位：
+
+```json
+{"status": "error", "detail": [{"field": "body.dht22_temperature", "input": 99.0, "message": "...", "type": "..."}]}
+```
+
 ## 設定（環境變數）
 
 | 變數 | 預設 | 說明 |
 | --- | --- | --- |
 | `CLIMATE_HOST` / `CLIMATE_PORT` | `0.0.0.0` / `8801` | 綁定位址與埠 |
+| `CLIMATE_LOG_LEVEL` | `INFO` | 日誌等級（`DEBUG` / `INFO` / `WARNING` / `ERROR`） |
 | `FAN_TEMP_ON_C` / `FAN_TEMP_OFF_C` | `28` / `26` | 溫度開 / 關閾值（含遲滯） |
 | `FAN_HUMIDITY_ON` / `FAN_HUMIDITY_OFF` | `70` / `65` | 溼度開 / 關閾值 |
 | `AGENT_OVERRIDE_TTL_S` | `60` | 代理人指令後暫停規則引擎的秒數 |

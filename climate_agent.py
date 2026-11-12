@@ -8,7 +8,7 @@ control loop:
     climate_agent --(POST /api/fan/command)--> FastAPI --> ESP32
 
 It subscribes to the transport layer's SSE stream, asks a local Ollama model for
-a fan decision on every DHT22 reading, and pushes the command back. When Ollama
+a fan decision on every DHT11 reading, and pushes the command back. When Ollama
 is unavailable or returns something unusable it falls back to the deterministic
 rule engine in ``server/rules.py`` so the loop never stalls.
 
@@ -40,7 +40,7 @@ DEFAULT_OLLAMA = "http://127.0.0.1:11434"
 
 SYSTEM_PROMPT = (
     "You are climate_agent, the environment control agent for a room. "
-    "You receive DHT22 temperature (Celsius) and relative humidity (percent) "
+    "You receive DHT11 temperature (Celsius) and relative humidity (percent) "
     "readings and decide whether the cooling fan should be ON or OFF. "
     "Keep the room comfortable (roughly 24-27 C, 40-60% humidity). "
     "Avoid rapid toggling: only change the current fan state when the reading "
