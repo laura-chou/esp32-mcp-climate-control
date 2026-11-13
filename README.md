@@ -3,7 +3,8 @@
 ESP32 + MCP + Ollama 本機氣候控制系統。
 
 本 repo 目前實作了架構圖中 **「本機電腦（PC）傳輸層」** 的部分：
-FastAPI 伺服器（Port 8801），負責接收 ESP32 上報的 DHT11 溫溼度資料、
+FastAPI 伺服器（Port 8801），負責接收 ESP32 上報的**多模態空間感知**資料
+（DHT11 溫溼度 + PIR 人體動態 + MQ-135 空氣品質）、
 以 SSE 即時推播給 MCP 核心 / `climate_agent.py`，並提供風扇指令的下行通道。
 
 ```
@@ -30,7 +31,7 @@ ESP32 ──HTTP POST /api/climate──▶ FastAPI ──SSE /api/stream──�
 │   ├── esp32_simulator.py      # 模擬 ESP32：上報資料 + 輪詢指令
 │   └── mcp_agent_consumer.py   # 精簡版 MCP 消費者（佔位決策，示範用）
 ├── esp32/                      # ⚠️ ESP32 端 MicroPython 韌體（放到開發板上）
-│   ├── main.py                 # 讀 DHT11 → 上報 → 輪詢指令 → 控制繼電器
+│   ├── main.py                 # 讀 DHT11 + PIR + MQ-135 → 上報 → 輪詢指令 → 控制繼電器
 │   └── config.py               # WiFi、PC IP、腳位設定（要先編輯）
 └── tests/
     ├── test_transport.py       # pytest 測試（含真實 SSE 串流）
@@ -67,7 +68,7 @@ python main.py
 ```bash
 curl -X POST http://127.0.0.1:8801/api/climate \
   -H 'Content-Type: application/json' \
-  -d '{"device_id":"esp32-climate-01","dht11_temperature":31.2,"dht11_humidity":55.0}'
+  -d '{"device_id":"esp32-climate-01","dht11_temperature":31.2,"dht11_humidity":55.0,"pir_motion":true,"mq_triggered":false}'
 ```
 
 回應會附帶目前應套用的風扇指令，ESP32 可在同一次往返就取得結果：
@@ -75,13 +76,27 @@ curl -X POST http://127.0.0.1:8801/api/climate \
 ```json
 {
   "status": "ok",
-  "reading": {"device_id": "esp32-climate-01", "dht11_temperature": 31.2, "...": "..."},
+  "reading": {"device_id": "esp32-climate-01", "dht11_temperature": 31.2, "pir_motion": true, "mq_triggered": false, "...": "..."},
   "fan_command": {"command": "ON", "reason": "temperature crossed threshold (T=31.2C, H=55.0%)", "source": "rule-engine", "seq": 1}
 }
 ```
 
 `dht11_temperature`（0~50 °C）與 `dht11_humidity`（20~90 %，DHT11 實體量測範圍）超出範圍會回 `422`。
 `device_id` 可省略，預設為 `esp32-climate-01`。
+
+**多模態欄位**（皆可省略，預設 `false`，因此舊韌體仍相容）：
+
+| 欄位 | 型別 | 說明 |
+| --- | --- | --- |
+| `pir_motion` | bool | PIR 偵測到人體動態 |
+| `mq_triggered` | bool | MQ-135 空氣品質 DO 已觸發（超過門檻） |
+
+**規則引擎的多模態決策優先序**（`server/rules.py`）：
+
+1. **空氣品質優先**：`mq_triggered=true` → 一律開風扇通風（即使涼爽、無人）。
+2. **舒適帶（含遲滯）**：`T ≥ 28 °C` 或 `H ≥ 70 %` 開；`T ≤ 26 °C` 且 `H ≤ 65 %` 才關。
+3. **PIR 節能**：無人（`pir_motion=false`）且已在舒適帶 → 傾向關閉省電；
+   但「過熱／過濕」與「空氣品質」仍會優先開啟。
 
 ### 2. SSE 串流 — `GET /api/stream`
 
@@ -93,7 +108,7 @@ event: snapshot
 data: {"seq": 3, "readings": {...}}
 
 event: reading
-data: {"device_id": "esp32-climate-01", "dht11_temperature": 30.0, "dht11_humidity": 75.0, "...": "..."}
+data: {"device_id": "esp32-climate-01", "dht11_temperature": 30.0, "dht11_humidity": 75.0, "pir_motion": true, "mq_triggered": false, "...": "..."}
 
 event: fan_command
 data: {"device_id": "esp32-climate-01", "command": "ON", "reason": "...", "source": "climate_agent", "seq": 4}
@@ -142,11 +157,18 @@ curl -X POST http://127.0.0.1:8801/api/fan/command \
 | 元件 | ESP32 腳位 |
 | --- | --- |
 | DHT11 資料腳 | GPIO21 |
+| PIR 人體感測（數位輸出） | GPIO14 |
+| MQ-135 空氣品質 DO（數位輸出） | GPIO27 |
 | 繼電器 INL（左） | GPIO22 |
 | 繼電器 INR（右） | GPIO23 |
 
 兩個繼電器由同一道指令同步開關。多數廉價繼電器板是**低電位觸發**（LOW = 開）；
 若你的板子是**高電位觸發**，把 `config.py` 的 `RELAY_ACTIVE_LOW` 改成 `False`。
+
+PIR 模組多為**高電位觸發**（有動態 = HIGH，`PIR_ACTIVE_HIGH = True`）；
+MQ-135 模組的 DO 多為**低電位觸發**（超過門檻 = LOW，`MQ_ACTIVE_LOW = True`）。
+兩者都可在 `esp32/config.py` 調整，韌體會依設定轉成邏輯值後再上報
+（`pir_motion`、`mq_triggered` 一律是「事件發生 = `true`」）。
 
 ### 部署步驟
 
@@ -162,7 +184,7 @@ curl -X POST http://127.0.0.1:8801/api/fan/command \
    mpremote connect /dev/ttyUSB0 reset
    ```
 
-3. ESP32 開機後會自動執行：連 Wi-Fi → 每 5 秒讀 DHT11 並 `POST /api/climate` →
+3. ESP32 開機後會自動執行：連 Wi-Fi → 每 5 秒讀 DHT11 + PIR + MQ-135 並 `POST /api/climate` →
    依回應與 `GET /api/fan/command` 的指令切換繼電器。
 
 > ⚠️ `SERVER_HOST` 不能填 `192.168.0.0` —— 那是網段位址，不是可連線的主機。
@@ -180,7 +202,7 @@ DHT11 的實體量測範圍為 **溫度 0~50 °C、濕度 20~90 %**。上電初�
 
 上報 body：
 ```json
-{"device_id": "esp32-climate-01", "dht11_temperature": 31.2, "dht11_humidity": 55.0}
+{"device_id": "esp32-climate-01", "dht11_temperature": 31.2, "dht11_humidity": 55.0, "pir_motion": true, "mq_triggered": false}
 ```
 取得指令：`GET /api/fan/command?device_id=...&since_seq=...` → `{"command": "ON"|"OFF", ...}`
 
@@ -247,8 +269,22 @@ python climate_agent.py --mode llm --model qwen2.5:14b   # 讓較強模型決策
 `advisor` 模式的輸出會同時顯示模型建議與是否同意，方便觀察：
 
 ```
-[DECIDE] esp32-climate-01 T=28.0 H=68.0 -> ON (rule-engine: temperature crossed threshold (T=28.0C, H=68.0%)) | llm DISAGREES: OFF (temperature is above comfort range)
+[DECIDE] esp32-climate-01 T=28.0 H=68.0 motion=True mq=False -> ON (rule-engine: temperature crossed threshold (T=28.0C, H=68.0%)) | llm DISAGREES: OFF (temperature is above comfort range)
 ```
+
+### 多模態決策
+
+代理人的提示詞與決策都吃三個維度（`SYSTEM_PROMPT` + `build_messages`）：
+
+1. **舒適帶**：24–27 °C、40–60 %。
+2. **空氣品質（MQ-135）**：`mq_triggered=true` 時優先開風扇通風。
+3. **佔用／節能（PIR）**：`pir_motion=false`（無人）時傾向關閉省電，
+   除非明顯過熱／過濕或空氣品質差。
+
+`build_messages()` 會把 `pir_motion` 與 `mq_triggered` 帶進 user prompt。
+
+> ⚠️ **MQ-135 安全聯鎖**：`mq_triggered=true` 是**安全事件**，在**所有模式**
+> （含 `llm`）都由規則引擎直接強制開風扇通風，模型與舒適帶都不能推翻它。
 
 常用參數：
 
@@ -266,11 +302,15 @@ python climate_agent.py --mode llm --model qwen2.5:14b   # 讓較強模型決策
 
 - **決策與說明分離**：`rules` / `advisor` 模式由 `server/rules.py` 決策；
   正式 `reason` 由程式依真實數字生成，杜絕「理由與數據矛盾」。
+- **多模態**：`pir_motion` 帶入節能判斷、`mq_triggered` 帶入通風判斷；
+  正式理由也會反映這些來源（例如 `MQ-135 air quality threshold exceeded`）。
+- **MQ-135 安全聯鎖**：`mq_triggered=true` 在所有模式都由規則引擎強制通風，
+  且被視為緊急事件，不受防抖護欄阻擋。
 - **模型僅顧問**：`advisor` 仍呼叫模型並記錄其建議（含 `agrees` / `DISAGREES`），
   但模型的 command 不會成為正式指令。
 - **`llm` 模式的雙重保險**：即使讓模型決策，正式理由仍由程式生成；解析失敗或
   連線錯誤時自動退回規則引擎。
-- **防抖護欄**：除非讀值明顯偏離舒適帶（緊急），否則兩次切換需間隔
+- **防抖護欄**：除非讀值明顯偏離舒適帶（緊急，含 MQ 觸發），否則兩次切換需間隔
   `--min-switch-seconds`，避免抖動造成繼電器狂切。
 - **斷線重連**：SSE 串流中斷時以指數退避自動重連。
 
@@ -318,9 +358,10 @@ python climate_agent.py --mode llm --model qwen2.5:14b   # 讓較強模型決策
 pytest
 ```
 
-涵蓋：上報與規則決策、遲滯行為、輸入驗證、代理人覆寫、輪詢 / long-poll、
-真實 SSE 串流（以 uvicorn 實跑）、token 驗證、健康與狀態端點，以及
-`climate_agent` 的決策模式（`advisor` / `rules` / `llm`）、理由生成、JSON 解析與防抖護欄。
+涵蓋：上報與規則決策、遲滯行為、多模態（PIR 節能 / MQ-135 通風）、輸入驗證、
+代理人覆寫、輪詢 / long-poll、真實 SSE 串流（以 uvicorn 實跑）、token 驗證、
+健康與狀態端點，以及 `climate_agent` 的決策模式（`advisor` / `rules` / `llm`）、
+理由生成、多模態提示詞、JSON 解析與防抖護欄。
 
 ## 後續整合（尚未實作）
 

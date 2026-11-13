@@ -25,9 +25,11 @@ class FanState(str, Enum):
 
 
 class ClimateReading(BaseModel):
-    """Incoming telemetry from the ESP32 DHT11 sensor.
+    """Incoming telemetry from the ESP32 DHT11 + PIR + MQ-135 sensors.
 
-    The validation window matches the DHT11 physical range (0-50 C, 20-90 %).
+    The temperature/humidity validation window matches the DHT11 physical range
+    (0-50 C, 20-90 %). ``pir_motion`` and ``mq_triggered`` are optional so older
+    firmware that only reports climate still works.
     """
 
     model_config = ConfigDict(extra="allow", populate_by_name=True)
@@ -38,6 +40,11 @@ class ClimateReading(BaseModel):
     device_id: str = Field("esp32-climate-01", description="Edge device identifier")
     timestamp: Optional[datetime] = Field(
         default=None, description="Device clock; server time is used when omitted"
+    )
+
+    pir_motion: bool = Field(False, description="PIR motion detected")
+    mq_triggered: bool = Field(
+        False, description="MQ-135 air quality threshold triggered"
     )
 
     @field_validator("dht11_temperature")
@@ -61,6 +68,8 @@ class ClimateReadingEnvelope(BaseModel):
     device_id: str
     dht11_temperature: float
     dht11_humidity: float
+    pir_motion: bool = False
+    mq_triggered: bool = False
     received_at: datetime = Field(default_factory=_utcnow)
     device_timestamp: Optional[datetime] = None
 

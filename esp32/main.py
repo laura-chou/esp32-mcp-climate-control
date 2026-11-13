@@ -1,6 +1,7 @@
 """ESP32 MicroPython firmware for the climate-control system.
 
-Reads a DHT11 sensor and drives two relay outputs (INL / INR) based on fan
+Reads a DHT11 sensor plus a PIR motion sensor and an MQ-135 air-quality
+(digital output) sensor, and drives two relay outputs (INL / INR) based on fan
 commands from the PC transport layer:
 
     POST /api/climate       upload the reading; the response carries the
@@ -29,6 +30,10 @@ from config import (
     DHT11_TEMP_MAX_C,
     DHT11_TEMP_MIN_C,
     DHT_PIN,
+    MQ_ACTIVE_LOW,
+    MQ_PIN,
+    PIR_ACTIVE_HIGH,
+    PIR_PIN,
     READ_INTERVAL_S,
     RELAY_ACTIVE_LOW,
     RELAY_INL_PIN,
@@ -43,6 +48,8 @@ from config import (
 sensor = dht.DHT11(machine.Pin(DHT_PIN))
 relay_inl = machine.Pin(RELAY_INL_PIN, machine.Pin.OUT)
 relay_inr = machine.Pin(RELAY_INR_PIN, machine.Pin.OUT)
+pir_pin = machine.Pin(PIR_PIN, machine.Pin.IN)
+mq_pin = machine.Pin(MQ_PIN, machine.Pin.IN)
 
 
 def base_url():
@@ -117,11 +124,27 @@ def read_sensor():
     return None
 
 
+def read_motion():
+    """Return True while the PIR sensor reports motion."""
+
+    level = bool(pir_pin.value())
+    return level if PIR_ACTIVE_HIGH else not level
+
+
+def read_air_quality():
+    """Return True when the MQ-135 DO pin signals the gas threshold is exceeded."""
+
+    level = bool(mq_pin.value())
+    return (not level) if MQ_ACTIVE_LOW else level
+
+
 def post_reading(temperature, humidity):
     payload = {
         "device_id": DEVICE_ID,
         "dht11_temperature": round(temperature, 1),
         "dht11_humidity": round(humidity, 1),
+        "pir_motion": read_motion(),
+        "mq_triggered": read_air_quality(),
     }
     response = urequests.post(
         base_url() + "/api/climate",

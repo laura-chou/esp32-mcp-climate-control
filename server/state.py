@@ -99,6 +99,8 @@ class ClimateHub:
             device_id=reading.device_id,
             dht11_temperature=reading.dht11_temperature,
             dht11_humidity=reading.dht11_humidity,
+            pir_motion=reading.pir_motion,
+            mq_triggered=reading.mq_triggered,
             device_timestamp=reading.timestamp,
         )
         self._readings[reading.device_id] = envelope
@@ -146,14 +148,18 @@ class ClimateHub:
             envelope.dht11_humidity,
             current.command if current else None,
             self._settings,
+            pir_motion=envelope.pir_motion,
+            mq_triggered=envelope.mq_triggered,
         )
         if current is not None and current.command is desired:
             return current
         logger.info(
-            "rule-engine device=%s T=%.1fC H=%.1f%% -> %s (%s)",
+            "rule-engine device=%s T=%.1fC H=%.1f%% motion=%s mq=%s -> %s (%s)",
             envelope.device_id,
             envelope.dht11_temperature,
             envelope.dht11_humidity,
+            envelope.pir_motion,
+            envelope.mq_triggered,
             desired.value,
             reason,
         )

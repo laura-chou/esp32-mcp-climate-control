@@ -272,3 +272,91 @@ async def test_health_and_status(app):
         assert health.json()["status"] == "ok"
         snapshot = await client.get("/api/status")
         assert "esp32-climate-01" in snapshot.json()["devices"]
+
+
+@pytest.mark.asyncio
+async def test_reading_accepts_and_echoes_pir_and_mq(app):
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post(
+            "/api/climate",
+            json={
+                "dht11_temperature": 25.0,
+                "dht11_humidity": 50.0,
+                "pir_motion": True,
+                "mq_triggered": False,
+            },
+        )
+    assert resp.status_code == 201
+    reading = resp.json()["reading"]
+    assert reading["pir_motion"] is True
+    assert reading["mq_triggered"] is False
+
+
+@pytest.mark.asyncio
+async def test_pir_and_mq_default_false_when_absent(app):
+    # Older firmware that only reports climate must still validate.
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post(
+            "/api/climate",
+            json={"dht11_temperature": 25.0, "dht11_humidity": 50.0},
+        )
+    assert resp.status_code == 201
+    reading = resp.json()["reading"]
+    assert reading["pir_motion"] is False
+    assert reading["mq_triggered"] is False
+
+
+@pytest.mark.asyncio
+async def test_mq_trigger_forces_fan_on_even_when_cool(app):
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        # Cool and dry (would normally be OFF), but the air is bad -> ventilate.
+        resp = await client.post(
+            "/api/climate",
+            json={
+                "dht11_temperature": 24.0,
+                "dht11_humidity": 45.0,
+                "pir_motion": False,
+                "mq_triggered": True,
+            },
+        )
+    assert resp.status_code == 201
+    command = resp.json()["fan_command"]
+    assert command["command"] == "ON"
+    assert "MQ-135" in command["reason"]
+
+
+@pytest.mark.asyncio
+async def test_unoccupied_cool_room_keeps_fan_off(app):
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post(
+            "/api/climate",
+            json={
+                "dht11_temperature": 24.0,
+                "dht11_humidity": 45.0,
+                "pir_motion": False,
+                "mq_triggered": False,
+            },
+        )
+    command = resp.json()["fan_command"]
+    assert command["command"] == "OFF"
+
+
+@pytest.mark.asyncio
+async def test_unoccupied_but_hot_still_turns_fan_on(app):
+    # Energy saving must not let the room overheat: comfort trigger wins.
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post(
+            "/api/climate",
+            json={
+                "dht11_temperature": 31.0,
+                "dht11_humidity": 50.0,
+                "pir_motion": False,
+                "mq_triggered": False,
+            },
+        )
+    assert resp.json()["fan_command"]["command"] == "ON"

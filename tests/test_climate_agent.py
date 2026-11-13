@@ -28,11 +28,19 @@ class FakeChat:
         return reply
 
 
-def make_reading(temperature=30.0, humidity=55.0, device_id="esp32-climate-01"):
+def make_reading(
+    temperature=30.0,
+    humidity=55.0,
+    device_id="esp32-climate-01",
+    pir_motion=True,
+    mq_triggered=False,
+):
     return {
         "device_id": device_id,
         "dht11_temperature": temperature,
         "dht11_humidity": humidity,
+        "pir_motion": pir_motion,
+        "mq_triggered": mq_triggered,
     }
 
 
@@ -151,3 +159,74 @@ def test_module_is_importable_without_ollama():
     # Importing the module must not require an Ollama server or network.
     assert hasattr(climate_agent, "main")
     assert climate_agent.DEFAULT_OLLAMA.endswith(":11434")
+
+
+def test_prompt_carries_pir_and_mq():
+    chat = FakeChat(['{"command": "ON", "reason": "x"}'])
+    agent = Agent(chat, model="m", min_switch_seconds=0)
+    agent.decide(make_reading(temperature=25.0, humidity=50.0, pir_motion=True, mq_triggered=False))
+    _, messages = chat.calls[0]
+    content = messages[-1]["content"]
+    assert "pir_motion: True" in content
+    assert "mq_triggered: False" in content
+    # the system prompt teaches the multimodal policy
+    assert "MQ-135" in messages[0]["content"]
+
+
+def test_mq_interlock_skips_the_model_entirely():
+    # A triggered MQ-135 is handled by the safety interlock; the model is never
+    # consulted, so no advice is recorded.
+    chat = FakeChat(['{"command": "OFF", "reason": "nope"}'])
+    agent = Agent(chat, model="m", min_switch_seconds=0)
+    decision = agent.decide(make_reading(temperature=24.0, humidity=45.0, mq_triggered=True))
+    assert decision.command == "ON"
+    assert decision.advice == ""
+    assert chat.calls == []
+
+
+def test_mq_trigger_forces_on_and_reason_is_honest():
+    # Model says OFF, but a triggered MQ-135 must ventilate.
+    chat = FakeChat(['{"command": "OFF", "reason": "nope"}'])
+    agent = Agent(chat, model="m", min_switch_seconds=0)
+    decision = agent.decide(
+        make_reading(temperature=24.0, humidity=45.0, pir_motion=False, mq_triggered=True)
+    )
+    assert decision.command == "ON"
+    assert decision.source == "rule-engine"
+    assert "MQ-135" in decision.reason
+
+
+def test_unoccupied_comfortable_keeps_fan_off():
+    chat = FakeChat(['{"command": "ON", "reason": "nope"}'])
+    agent = Agent(chat, model="m", min_switch_seconds=0)
+    decision = agent.decide(
+        make_reading(temperature=24.0, humidity=45.0, pir_motion=False, mq_triggered=False)
+    )
+    assert decision.command == "OFF"
+    assert "unoccupied" in decision.reason
+
+
+def test_mq_trigger_counts_as_urgent():
+    # A triggered MQ-135 must be treated as urgent so ventilation is never
+    # blocked by the anti-flapping guard.
+    agent = Agent(FakeChat([]), model="m", min_switch_seconds=30.0)
+    comfortable = make_reading(temperature=25.0, humidity=50.0, mq_triggered=False)
+    bad_air = make_reading(temperature=25.0, humidity=50.0, mq_triggered=True)
+    assert agent._is_urgent(comfortable) is False
+    assert agent._is_urgent(bad_air) is True
+
+
+def test_mq_ventilation_is_applied_despite_recent_switch():
+    # Establish a switch, then a bad-air reading within the guard window must
+    # still turn the fan ON (urgent), where a comfort-only flip would be held.
+    chat = FakeChat(['{"command": "ON", "reason": "flip"}'])
+    agent = Agent(chat, model="m", min_switch_seconds=30.0, mode="llm")
+    agent.remember("esp32-climate-01", "OFF")
+    # Model says ON for a comfort reading -> allowed as the first switch.
+    first = agent.decide(make_reading(temperature=30.0, humidity=50.0))
+    assert first.command == "ON"
+    # Now the model says OFF, but the air is bad: MQ urgency forces ON.
+    chat.replies.append('{"command": "OFF", "reason": "off"}')
+    bad = agent.decide(make_reading(temperature=25.0, humidity=50.0, mq_triggered=True))
+    assert bad.command == "ON"
+    assert "MQ-135" in bad.reason

@@ -30,8 +30,15 @@ def decide_with_placeholder_agent(reading: dict) -> tuple[str, str]:
 
     temperature = reading["dht11_temperature"]
     humidity = reading["dht11_humidity"]
+    motion = bool(reading.get("pir_motion", False))
+    mq = bool(reading.get("mq_triggered", False))
+    # Air quality overrides everything; then comfort; then occupancy/energy.
+    if mq:
+        return "ON", "agent: MQ-135 triggered -> ventilate"
     if temperature >= 29.0 or humidity >= 72.0:
         return "ON", f"agent: T={temperature:.1f}C H={humidity:.1f}% -> cool/dry"
+    if not motion:
+        return "OFF", "agent: comfortable and unoccupied -> energy saving"
     if temperature <= 25.5 and humidity <= 60.0:
         return "OFF", f"agent: T={temperature:.1f}C H={humidity:.1f}% -> comfortable"
     return "ON", "agent: holding previous decision"
@@ -57,7 +64,8 @@ def main() -> None:
                 data = json.loads(line.split(":", 1)[1].strip())
                 if event_name == "reading":
                     print(f"[READ] {data['device_id']} T={data['dht11_temperature']} "
-                          f"H={data['dht11_humidity']}")
+                          f"H={data['dht11_humidity']} motion={data.get('pir_motion')} "
+                          f"mq={data.get('mq_triggered')}")
                     command, reason = decide_with_placeholder_agent(data)
                     resp = client.post(
                         f"{args.base}/api/fan/command",

@@ -4,8 +4,8 @@ Run the server first, then:
 
     python examples/esp32_simulator.py
 
-It POSTs a synthetic DHT11 reading every few seconds and polls
-``/api/fan/command`` (with long-polling) to display the fan state.
+It POSTs a synthetic multimodal reading (DHT11 + PIR + MQ-135) every few seconds
+and polls ``/api/fan/command`` (with long-polling) to display the fan state.
 """
 
 from __future__ import annotations
@@ -35,6 +35,14 @@ def main() -> None:
     parser.add_argument("--device-id", default="esp32-climate-01")
     parser.add_argument("--interval", type=float, default=5.0)
     parser.add_argument("--token", default=None, help="Value for X-Device-Token")
+    parser.add_argument(
+        "--mq-chance", type=float, default=0.15,
+        help="Probability a reading reports a triggered air-quality threshold",
+    )
+    parser.add_argument(
+        "--motion-chance", type=float, default=0.7,
+        help="Probability a reading reports PIR motion",
+    )
     args = parser.parse_args()
 
     headers = {"X-Device-Token": args.token} if args.token else {}
@@ -44,10 +52,14 @@ def main() -> None:
         while True:
             temperature = round(random.uniform(24.0, 33.0), 1)
             humidity = round(random.uniform(40.0, 85.0), 1)
+            motion = random.random() < args.motion_chance
+            mq = random.random() < args.mq_chance
             payload = {
                 "device_id": args.device_id,
                 "dht11_temperature": temperature,
                 "dht11_humidity": humidity,
+                "pir_motion": motion,
+                "mq_triggered": mq,
             }
             try:
                 resp = client.post(f"{args.base}/api/climate", json=payload, timeout=10.0)
@@ -56,7 +68,7 @@ def main() -> None:
                 fan = ack["fan_command"]["command"]
                 print(
                     f"[POST] T={temperature:>4.1f}C H={humidity:>4.1f}% "
-                    f"-> fan={fan} ({ack['fan_command']['reason']})"
+                    f"motion={motion} mq={mq} -> fan={fan} ({ack['fan_command']['reason']})"
                 )
                 last_seq = ack["fan_command"]["seq"]
             except httpx.HTTPError as exc:

@@ -53,10 +53,16 @@ DEFAULT_BASE = "http://127.0.0.1:8801"
 DEFAULT_OLLAMA = "http://127.0.0.1:11434"
 
 SYSTEM_PROMPT = (
-    "You are climate_agent, the environment control agent for a room. "
-    "You receive DHT11 temperature (Celsius) and relative humidity (percent) "
-    "readings and advise whether the cooling fan should be ON or OFF. "
-    "Keep the room comfortable (roughly 24-27 C, 40-60% humidity). "
+    "You are climate_agent, the multimodal environment control agent for a room. "
+    "On every reading you receive: DHT11 temperature (Celsius) and relative "
+    "humidity (percent), a PIR motion flag (whether someone is present) and an "
+    "MQ-135 air-quality flag (whether the gas threshold is exceeded). "
+    "Advise whether the cooling/ventilation fan should be ON or OFF, weighing: "
+    "(1) comfort -- keep roughly 24-27 C, 40-60% humidity; "
+    "(2) air quality -- if the MQ-135 threshold is exceeded, prefer ON to ventilate, "
+    "regardless of temperature; "
+    "(3) occupancy/energy -- when nobody is present (no motion), prefer OFF to save "
+    "energy unless the room is clearly too hot, too humid, or the air is bad. "
     "Avoid rapid toggling: only change the current fan state when the reading "
     "clearly justifies it, otherwise keep the current state. "
     "Do NOT restate the numbers in your reason -- the controller adds the exact "
@@ -182,6 +188,8 @@ class Agent:
             f"device_id: {reading['device_id']}\n"
             f"dht11_temperature: {reading['dht11_temperature']}\n"
             f"dht11_humidity: {reading['dht11_humidity']}\n"
+            f"pir_motion: {bool(reading.get('pir_motion', False))}\n"
+            f"mq_triggered: {bool(reading.get('mq_triggered', False))}\n"
             f"current_fan: {current}\n"
             f"comfort_band_c: {s.temp_off_c}-{s.temp_on_c}\n"
             f"humidity_band_pct: {s.humidity_off}-{s.humidity_on}\n"
@@ -200,7 +208,8 @@ class Agent:
         temperature = reading["dht11_temperature"]
         humidity = reading["dht11_humidity"]
         return (
-            temperature >= s.temp_on_c + 3.0
+            bool(reading.get("mq_triggered", False))
+            or temperature >= s.temp_on_c + 3.0
             or humidity >= s.humidity_on + 5.0
             or temperature <= s.temp_off_c - 3.0
         )
@@ -215,10 +224,17 @@ class Agent:
         s = self._settings
         t = reading["dht11_temperature"]
         h = reading["dht11_humidity"]
+        motion = bool(reading.get("pir_motion", False))
+        mq = bool(reading.get("mq_triggered", False))
         hot = t >= s.temp_on_c or h >= s.humidity_on
         cool = t <= s.temp_off_c and h <= s.humidity_off
 
         if command == "ON":
+            if mq:
+                return (
+                    f"ON: MQ-135 air quality threshold exceeded -> ventilate "
+                    f"(T={t:.1f}C, H={h:.1f}%)"
+                )
             if current == "ON" and not cool:
                 return (
                     f"holding ON: T={t:.1f}C / H={h:.1f}% still above the OFF "
@@ -238,14 +254,21 @@ class Agent:
 
         # command == "OFF"
         if current == "ON" and cool:
+            suffix = " (unoccupied -> energy saving)" if not motion else ""
             return (
                 f"OFF: cooled to T={t:.1f}C<={s.temp_off_c}C and "
-                f"H={h:.1f}%<={s.humidity_off}%"
+                f"H={h:.1f}%<={s.humidity_off}%{suffix}"
+            )
+        if mq:
+            return (
+                f"OFF (model override): MQ-135 threshold still exceeded "
+                f"(T={t:.1f}C, H={h:.1f}%) -- ventilation recommended"
             )
         if not hot:
+            suffix = " and unoccupied" if not motion else ""
             return (
                 f"OFF: within band (T={t:.1f}C<{s.temp_on_c}C, "
-                f"H={h:.1f}%<{s.humidity_on}%)"
+                f"H={h:.1f}%<{s.humidity_on}%){suffix}"
             )
         return (
             f"OFF (model override): T={t:.1f}C / H={h:.1f}% still above the ON "
@@ -258,6 +281,8 @@ class Agent:
             reading["dht11_humidity"],
             FanState(current),
             self._settings,
+            pir_motion=bool(reading.get("pir_motion", False)),
+            mq_triggered=bool(reading.get("mq_triggered", False)),
         )
         return Decision(state.value, reason, "rule-engine")
 
@@ -275,23 +300,30 @@ class Agent:
         command, reason = parsed
         return Advice(command, reason)
 
+    def _decide_llm(self, reading: dict, current: str) -> Decision:
+        advice = self._consult(reading, current)
+        if advice is None:
+            return self._rule_decision(reading, current)
+        return Decision(
+            advice.command,
+            self._describe(advice.command, reading, current),
+            "climate_agent",
+            advice.reason,
+        )
+
     def decide(self, reading: dict) -> Decision:
         device_id = reading["device_id"]
         current = self.current_state(device_id)
 
-        if self.mode == "rules":
+        # Safety interlock: a triggered MQ-135 forces ventilation in every mode
+        # (even llm) so air quality can never be overruled by the model or the
+        # comfort band.
+        if bool(reading.get("mq_triggered", False)):
+            decision = self._rule_decision(reading, current)
+        elif self.mode == "rules":
             decision = self._rule_decision(reading, current)
         elif self.mode == "llm":
-            advice = self._consult(reading, current)
-            if advice is None:
-                decision = self._rule_decision(reading, current)
-            else:
-                decision = Decision(
-                    advice.command,
-                    self._describe(advice.command, reading, current),
-                    "climate_agent",
-                    advice.reason,
-                )
+            decision = self._decide_llm(reading, current)
         else:  # advisor (default): rules decide, model advises
             decision = self._rule_decision(reading, current)
             advice = self._consult(reading, current)
@@ -388,7 +420,9 @@ def _handle_reading(
     decision = agent.decide(reading)
     line = (
         f"[DECIDE] {reading['device_id']} T={reading['dht11_temperature']} "
-        f"H={reading['dht11_humidity']} -> {decision.command} "
+        f"H={reading['dht11_humidity']} "
+        f"motion={bool(reading.get('pir_motion', False))} "
+        f"mq={bool(reading.get('mq_triggered', False))} -> {decision.command} "
         f"({decision.source}: {decision.reason})"
     )
     if decision.advice:

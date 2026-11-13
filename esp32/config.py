@@ -27,6 +27,14 @@ DEVICE_TOKEN = None
 DHT_PIN = 21          # DHT11 data pin
 RELAY_INL_PIN = 22    # left relay / fan
 RELAY_INR_PIN = 23    # right relay / fan
+PIR_PIN = 14          # PIR motion sensor (digital input)
+MQ_PIN = 27           # MQ-135 air-quality DO (digital trigger input)
+
+# Most PIR modules drive HIGH while motion is detected.
+PIR_ACTIVE_HIGH = True
+
+# Most MQ-135 breakout boards pull DO LOW when the gas threshold is exceeded.
+MQ_ACTIVE_LOW = True
 
 # Most cheap relay boards are active-LOW (a LOW signal turns the relay on).
 # Set to False if your board is active-HIGH.

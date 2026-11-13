@@ -115,11 +115,13 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                 reading.device_id, FanState.OFF, "initial state", "rule-engine"
             )
         logger.info(
-            "ingest from %s device=%s T=%.1fC H=%.1f%% mode=%s -> fan=%s (source=%s)",
+            "ingest from %s device=%s T=%.1fC H=%.1f%% motion=%s mq=%s mode=%s -> fan=%s (source=%s)",
             client_ip(request),
             reading.device_id,
             reading.dht11_temperature,
             reading.dht11_humidity,
+            reading.pir_motion,
+            reading.mq_triggered,
             hub.control_mode(reading.device_id),
             current.command.value,
             current.source,
