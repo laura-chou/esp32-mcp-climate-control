@@ -1,0 +1,16 @@
+# PC-side transport layer (FastAPI) dependencies
+fastapi>=0.110,<1.0
+uvicorn[standard]>=0.27
+pydantic>=2.6,<3.0
+sse-starlette>=2.0
+
+# --- climate_agent (Ollama-driven fan controller) ---
+# Requires: httpx (below) and a reachable Ollama server.
+# The client talks to Ollama's HTTP API directly, so the `ollama` package
+# is optional; uncomment it only if you prefer that SDK.
+# ollama>=0.3
+
+# --- Development / testing ---
+pytest>=8.0
+pytest-asyncio>=0.23
+httpx>=0.27
