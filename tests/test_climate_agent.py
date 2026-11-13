@@ -7,6 +7,8 @@ runs as real code.
 
 from __future__ import annotations
 
+import time
+
 import pytest
 
 import climate_agent
@@ -105,7 +107,9 @@ def test_llm_mode_uses_model_decision_with_honest_reason():
     assert decision.command == "ON"
     assert decision.source == "climate_agent"
     # reason is generated from the numbers, not the model's free text
-    assert "T=30.0C>=28.0C" in decision.reason
+    assert "T=30.0C" in decision.reason
+    assert "needs cooling" in decision.reason
+    assert "warm and humid" not in decision.reason
     assert agent.current_state("esp32-climate-01") == "ON"
 
 
@@ -230,3 +234,87 @@ def test_mq_ventilation_is_applied_despite_recent_switch():
     bad = agent.decide(make_reading(temperature=25.0, humidity=50.0, mq_triggered=True))
     assert bad.command == "ON"
     assert "MQ-135" in bad.reason
+
+
+# ---------------------------------------------------------------------------
+# hybrid mode: rules precompute the climate flag, the model weighs PIR
+# ---------------------------------------------------------------------------
+
+
+def test_hybrid_prompt_passes_semantic_flags_not_raw_numbers():
+    chat = FakeChat(['{"command": "ON", "reason": "x"}'])
+    agent = Agent(chat, model="m", min_switch_seconds=0, mode="hybrid")
+    # 29C -> needs cooling, but not extreme; unoccupied.
+    agent.decide(make_reading(temperature=29.0, humidity=50.0, pir_motion=False))
+    _, messages = chat.calls[0]
+    content = messages[-1]["content"]
+    assert "climate_needs_cooling: True" in content
+    assert "climate_extreme: False" in content
+    # raw numbers are deliberately withheld so the model cannot do arithmetic
+    assert "dht11_temperature" not in content
+    assert "29.0" not in content
+
+
+def test_hybrid_model_may_save_energy_when_unoccupied():
+    # needs_cooling True, not extreme, unoccupied -> the model may keep OFF.
+    chat = FakeChat(['{"command": "OFF", "reason": "nobody here"}'])
+    agent = Agent(chat, model="m", min_switch_seconds=0, mode="hybrid")
+    decision = agent.decide(make_reading(temperature=29.0, humidity=50.0, pir_motion=False))
+    assert decision.command == "OFF"
+    assert decision.source == "climate_agent"
+    assert "energy saving" in decision.reason
+
+
+def test_hybrid_envelope_forces_on_when_cooling_and_occupied():
+    # Same climate, but someone is present: the model cannot save energy here.
+    chat = FakeChat(['{"command": "OFF", "reason": "save energy"}'])
+    agent = Agent(chat, model="m", min_switch_seconds=0, mode="hybrid")
+    decision = agent.decide(make_reading(temperature=29.0, humidity=50.0, pir_motion=True))
+    assert decision.command == "ON"
+    assert "needs cooling" in decision.reason
+
+
+def test_hybrid_envelope_forces_on_when_extreme_even_unoccupied():
+    chat = FakeChat(['{"command": "OFF", "reason": "save energy"}'])
+    agent = Agent(chat, model="m", min_switch_seconds=0, mode="hybrid")
+    # 35C is extreme -> the fan must run regardless of occupancy.
+    decision = agent.decide(make_reading(temperature=35.0, humidity=50.0, pir_motion=False))
+    assert decision.command == "ON"
+    assert "extreme" in decision.reason
+
+
+def test_hybrid_model_turns_off_when_comfortable():
+    chat = FakeChat(['{"command": "OFF", "reason": "comfortable"}'])
+    agent = Agent(chat, model="m", min_switch_seconds=0, mode="hybrid")
+    decision = agent.decide(make_reading(temperature=25.0, humidity=50.0, pir_motion=True))
+    assert decision.command == "OFF"
+    assert "comfortable" in decision.reason
+
+
+def test_hybrid_falls_back_to_rules_on_error():
+    chat = FakeChat([RuntimeError("ollama down")])
+    agent = Agent(chat, model="m", min_switch_seconds=0, mode="hybrid")
+    decision = agent.decide(make_reading(temperature=31.0, humidity=50.0))
+    assert decision.source == "rule-engine"
+    assert decision.command == "ON"
+
+
+def test_hybrid_mq_interlock_skips_the_model():
+    chat = FakeChat(['{"command": "OFF", "reason": "nope"}'])
+    agent = Agent(chat, model="m", min_switch_seconds=0, mode="hybrid")
+    decision = agent.decide(make_reading(temperature=24.0, humidity=45.0, mq_triggered=True))
+    assert decision.command == "ON"
+    assert decision.source == "rule-engine"
+    assert chat.calls == []
+
+
+def test_hybrid_keeps_min_switch_guard():
+    chat = FakeChat(['{"command": "OFF", "reason": "flip"}'])
+    agent = Agent(chat, model="m", min_switch_seconds=30.0, mode="hybrid")
+    # Fan is ON (seeded); the room is comfortable so the model says OFF, but the
+    # flip is non-urgent and within the guard window -> held ON.
+    agent.remember("esp32-climate-01", "ON")
+    agent._last_switch["esp32-climate-01"] = time.monotonic()
+    decision = agent.decide(make_reading(temperature=25.0, humidity=50.0))
+    assert decision.command == "ON"
+    assert "holding" in decision.reason

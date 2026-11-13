@@ -17,14 +17,24 @@ comparisons: they hallucinate reasons that contradict the reading (e.g.
 "humidity is below 65%" while it is 68%) and flap around a threshold, because
 each token is sampled independently and the model has no hysteresis.
 
-So by default the ON/OFF *decision* is made by the deterministic rule engine in
-``server/rules.py`` (which has hysteresis and cannot contradict the numbers),
-and the model only *advises* -- its free text is never used as the authoritative
-reason. Modes (``--mode``):
+The agent therefore splits the work by what each side is good at:
+
+* **Temperature / humidity** -- decided by the deterministic rule engine in
+  ``server/rules.py`` (hysteresis, cannot contradict the numbers). The agent
+  computes a single boolean ``climate_needs_cooling`` and passes it to the model
+  as a *semantic* state, so the model never compares numbers itself.
+* **Multimodal context** -- the model weighs ``pir_motion`` (occupancy / energy)
+  and ``current_fan`` to make the final call.
+* **Safety floor** -- a triggered MQ-135 (bad air) and an extreme climate are
+  enforced in code and can never be overruled.
+
+Modes (``--mode``):
 
     advisor  (default) rule engine decides; the model advises (logged only)
     rules              rule engine only; the model is not called at all
-    llm                the model decides (use a capable model)
+    hybrid             rules precompute the climate flag, the model decides the
+                       final command within a code-enforced safety envelope
+    llm                the model decides on raw numbers (use a capable model)
 
 Run the server first, then:
 
@@ -47,24 +57,30 @@ import httpx
 
 from server.config import Settings, settings as default_settings
 from server.models import FanState
-from server.rules import decide_fan
+from server.rules import climate_is_extreme, climate_needs_cooling, decide_fan
 
 DEFAULT_BASE = "http://127.0.0.1:8801"
 DEFAULT_OLLAMA = "http://127.0.0.1:11434"
 
 SYSTEM_PROMPT = (
     "You are climate_agent, the multimodal environment control agent for a room. "
-    "On every reading you receive: DHT11 temperature (Celsius) and relative "
-    "humidity (percent), a PIR motion flag (whether someone is present) and an "
-    "MQ-135 air-quality flag (whether the gas threshold is exceeded). "
-    "Advise whether the cooling/ventilation fan should be ON or OFF, weighing: "
-    "(1) comfort -- keep roughly 24-27 C, 40-60% humidity; "
-    "(2) air quality -- if the MQ-135 threshold is exceeded, prefer ON to ventilate, "
-    "regardless of temperature; "
-    "(3) occupancy/energy -- when nobody is present (no motion), prefer OFF to save "
-    "energy unless the room is clearly too hot, too humid, or the air is bad. "
-    "Avoid rapid toggling: only change the current fan state when the reading "
-    "clearly justifies it, otherwise keep the current state. "
+    "The controller has ALREADY evaluated the temperature and humidity for you, "
+    "so you must NOT compare the raw numbers yourself -- do not do arithmetic. "
+    "You receive these fields: "
+    "climate_needs_cooling (bool): the temperature/humidity verdict, computed with "
+    "hysteresis by a deterministic rule engine; "
+    "climate_extreme (bool): the climate is far outside the comfort band (safety); "
+    "pir_motion (bool): whether someone is present; "
+    "mq_triggered (bool): whether the MQ-135 air-quality threshold is exceeded; "
+    "current_fan: the fan state right now. "
+    "Decide the final fan command (ON or OFF) by weighing occupancy and energy: "
+    "(1) if climate_extreme is true, keep the fan ON; "
+    "(2) if climate_needs_cooling is true and pir_motion is true, keep the fan ON; "
+    "(3) if climate_needs_cooling is true but pir_motion is false and the climate "
+    "is not extreme, you MAY keep the fan OFF to save energy; "
+    "(4) if climate_needs_cooling is false, prefer OFF. "
+    "Avoid rapid toggling: prefer keeping current_fan unless the flags clearly "
+    "justify a change. "
     "Do NOT restate the numbers in your reason -- the controller adds the exact "
     "figures itself, so any number you write may be wrong. Keep the reason short. "
     'Reply with ONLY a JSON object of the form '
@@ -150,10 +166,12 @@ class OllamaClient:
 class Agent:
     """Turns readings into fan decisions.
 
-    In ``advisor`` (default) and ``rules`` modes the deterministic rule engine
-    decides, so the command can never contradict the reading and never flaps.
-    In ``advisor`` mode the model is still consulted and its suggestion is
-    logged; in ``llm`` mode the model decides.
+    ``advisor`` (default) and ``rules``: the deterministic rule engine decides, so
+    the command can never contradict the reading and never flaps. ``hybrid``: the
+    rule engine precomputes the temperature/humidity verdict
+    (``climate_needs_cooling``) and the model weighs occupancy (PIR) to decide the
+    final command within a code-enforced safety envelope. ``llm``: the model
+    decides on raw numbers (use a capable model).
     """
 
     def __init__(
@@ -164,7 +182,7 @@ class Agent:
         mode: str = "advisor",
         settings: Settings = default_settings,
     ) -> None:
-        if mode not in ("advisor", "rules", "llm"):
+        if mode not in ("advisor", "rules", "hybrid", "llm"):
             raise ValueError(f"unknown mode: {mode!r}")
         self._chat = chat_client
         self._model = model
@@ -182,18 +200,30 @@ class Agent:
     def current_state(self, device_id: str) -> str:
         return self._states.get(device_id, "OFF")
 
+    def climate_needs_cooling(self, reading: dict, current: str) -> bool:
+        """Deterministic temperature/humidity verdict (hysteresis, no LLM)."""
+
+        return climate_needs_cooling(
+            reading["dht11_temperature"],
+            reading["dht11_humidity"],
+            FanState(current),
+            self._settings,
+        )
+
     def build_messages(self, reading: dict, current: str) -> list[dict[str, str]]:
         s = self._settings
+        needs_cooling = self.climate_needs_cooling(reading, current)
+        extreme = climate_is_extreme(
+            reading["dht11_temperature"], reading["dht11_humidity"], s
+        )
         user = (
             f"device_id: {reading['device_id']}\n"
-            f"dht11_temperature: {reading['dht11_temperature']}\n"
-            f"dht11_humidity: {reading['dht11_humidity']}\n"
+            f"climate_needs_cooling: {needs_cooling}\n"
+            f"climate_extreme: {extreme}\n"
             f"pir_motion: {bool(reading.get('pir_motion', False))}\n"
             f"mq_triggered: {bool(reading.get('mq_triggered', False))}\n"
             f"current_fan: {current}\n"
-            f"comfort_band_c: {s.temp_off_c}-{s.temp_on_c}\n"
-            f"humidity_band_pct: {s.humidity_off}-{s.humidity_on}\n"
-            "Advise the fan command now."
+            "Decide the fan command now."
         )
         return [
             {"role": "system", "content": SYSTEM_PROMPT},
@@ -205,13 +235,8 @@ class Agent:
         the anti-flapping guard."""
 
         s = self._settings
-        temperature = reading["dht11_temperature"]
-        humidity = reading["dht11_humidity"]
-        return (
-            bool(reading.get("mq_triggered", False))
-            or temperature >= s.temp_on_c + 3.0
-            or humidity >= s.humidity_on + 5.0
-            or temperature <= s.temp_off_c - 3.0
+        return bool(reading.get("mq_triggered", False)) or climate_is_extreme(
+            reading["dht11_temperature"], reading["dht11_humidity"], s
         )
 
     def _describe(self, command: str, reading: dict, current: str) -> str:
@@ -221,13 +246,12 @@ class Agent:
         contradict the reading -- including when the model overrides the band.
         """
 
-        s = self._settings
         t = reading["dht11_temperature"]
         h = reading["dht11_humidity"]
         motion = bool(reading.get("pir_motion", False))
         mq = bool(reading.get("mq_triggered", False))
-        hot = t >= s.temp_on_c or h >= s.humidity_on
-        cool = t <= s.temp_off_c and h <= s.humidity_off
+        needs_cooling = self.climate_needs_cooling(reading, current)
+        extreme = climate_is_extreme(t, h, self._settings)
 
         if command == "ON":
             if mq:
@@ -235,45 +259,35 @@ class Agent:
                     f"ON: MQ-135 air quality threshold exceeded -> ventilate "
                     f"(T={t:.1f}C, H={h:.1f}%)"
                 )
-            if current == "ON" and not cool:
-                return (
-                    f"holding ON: T={t:.1f}C / H={h:.1f}% still above the OFF "
-                    f"threshold (need T<={s.temp_off_c}C and H<={s.humidity_off}%)"
-                )
-            if hot:
-                triggers = []
-                if t >= s.temp_on_c:
-                    triggers.append(f"T={t:.1f}C>={s.temp_on_c}C")
-                if h >= s.humidity_on:
-                    triggers.append(f"H={h:.1f}%>={s.humidity_on}%")
-                return "ON: " + " and ".join(triggers)
+            if needs_cooling and extreme:
+                return f"ON: climate extreme, must cool (T={t:.1f}C, H={h:.1f}%)"
+            if needs_cooling:
+                return f"ON: climate needs cooling (T={t:.1f}C, H={h:.1f}%)"
+            if current == "ON":
+                return f"holding ON (T={t:.1f}C, H={h:.1f}%)"
             return (
-                f"ON (model override): within band (T={t:.1f}C<{s.temp_on_c}C, "
-                f"H={h:.1f}%<{s.humidity_on}%)"
+                f"ON (model override): within comfortable range "
+                f"(T={t:.1f}C, H={h:.1f}%)"
             )
 
         # command == "OFF"
-        if current == "ON" and cool:
-            suffix = " (unoccupied -> energy saving)" if not motion else ""
-            return (
-                f"OFF: cooled to T={t:.1f}C<={s.temp_off_c}C and "
-                f"H={h:.1f}%<={s.humidity_off}%{suffix}"
-            )
         if mq:
             return (
-                f"OFF (model override): MQ-135 threshold still exceeded "
+                f"OFF (model override): MQ-135 threshold exceeded "
                 f"(T={t:.1f}C, H={h:.1f}%) -- ventilation recommended"
             )
-        if not hot:
-            suffix = " and unoccupied" if not motion else ""
+        if needs_cooling and not extreme:
             return (
-                f"OFF: within band (T={t:.1f}C<{s.temp_on_c}C, "
-                f"H={h:.1f}%<{s.humidity_on}%){suffix}"
+                f"OFF (energy saving): climate needs cooling but unoccupied "
+                f"(T={t:.1f}C, H={h:.1f}%)"
             )
-        return (
-            f"OFF (model override): T={t:.1f}C / H={h:.1f}% still above the ON "
-            f"threshold (T>={s.temp_on_c}C or H>={s.humidity_on}%)"
-        )
+        if needs_cooling:
+            return (
+                f"OFF (model override): climate extreme, cooling recommended "
+                f"(T={t:.1f}C, H={h:.1f}%)"
+            )
+        suffix = " and unoccupied" if not motion else ""
+        return f"OFF: within comfortable range (T={t:.1f}C, H={h:.1f}%){suffix}"
 
     def _rule_decision(self, reading: dict, current: str) -> Decision:
         state, reason = decide_fan(
@@ -311,17 +325,49 @@ class Agent:
             advice.reason,
         )
 
+    def _decide_hybrid(self, reading: dict, current: str) -> Decision:
+        """Rules precompute the climate flag; the model weighs PIR/occupancy.
+
+        The model's command is only accepted inside a code-enforced safety
+        envelope, so a small model can still make the final multimodal call
+        without ever being able to (a) leave the fan off in an extreme climate or
+        (b) turn the fan off to "save energy" when cooling is actually required
+        *and* someone is present.
+        """
+
+        advice = self._consult(reading, current)
+        if advice is None:
+            return self._rule_decision(reading, current)
+
+        needs_cooling = self.climate_needs_cooling(reading, current)
+        extreme = climate_is_extreme(
+            reading["dht11_temperature"], reading["dht11_humidity"], self._settings
+        )
+        motion = bool(reading.get("pir_motion", False))
+
+        command = advice.command
+        if command == "OFF" and (extreme or (needs_cooling and motion)):
+            command = "ON"
+        return Decision(
+            command,
+            self._describe(command, reading, current),
+            "climate_agent",
+            advice.reason,
+        )
+
     def decide(self, reading: dict) -> Decision:
         device_id = reading["device_id"]
         current = self.current_state(device_id)
 
-        # Safety interlock: a triggered MQ-135 forces ventilation in every mode
-        # (even llm) so air quality can never be overruled by the model or the
+        # Safety floor: a triggered MQ-135 forces ventilation in every mode (even
+        # llm/hybrid) so air quality can never be overruled by the model or the
         # comfort band.
         if bool(reading.get("mq_triggered", False)):
             decision = self._rule_decision(reading, current)
         elif self.mode == "rules":
             decision = self._rule_decision(reading, current)
+        elif self.mode == "hybrid":
+            decision = self._decide_hybrid(reading, current)
         elif self.mode == "llm":
             decision = self._decide_llm(reading, current)
         else:  # advisor (default): rules decide, model advises
@@ -417,10 +463,12 @@ def consume_stream(args: argparse.Namespace, agent: Agent) -> None:
 def _handle_reading(
     client: httpx.Client, args: argparse.Namespace, agent: Agent, reading: dict
 ) -> None:
+    previous = agent.current_state(reading["device_id"])
+    needs_cooling = agent.climate_needs_cooling(reading, previous)
     decision = agent.decide(reading)
     line = (
         f"[DECIDE] {reading['device_id']} T={reading['dht11_temperature']} "
-        f"H={reading['dht11_humidity']} "
+        f"H={reading['dht11_humidity']} cool={needs_cooling} "
         f"motion={bool(reading.get('pir_motion', False))} "
         f"mq={bool(reading.get('mq_triggered', False))} -> {decision.command} "
         f"({decision.source}: {decision.reason})"
@@ -478,12 +526,14 @@ def main() -> None:
     parser.add_argument("--token", default=None, help="shared token (X-Device-Token)")
     parser.add_argument(
         "--mode",
-        choices=("advisor", "rules", "llm"),
+        choices=("advisor", "rules", "hybrid", "llm"),
         default="advisor",
         help=(
             "advisor: rule engine decides, model advises (default); "
             "rules: rule engine only, no model calls; "
-            "llm: model decides (needs a capable model)"
+            "hybrid: rules precompute the climate flag, the model decides the "
+            "final command within a code-enforced safety envelope; "
+            "llm: model decides on raw numbers (needs a capable model)"
         ),
     )
     parser.add_argument(

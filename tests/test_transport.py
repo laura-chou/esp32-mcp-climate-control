@@ -14,6 +14,8 @@ import uvicorn
 
 from server.app import create_app
 from server.config import Settings
+from server.models import FanState
+from server.rules import climate_is_extreme, climate_needs_cooling
 
 
 def make_settings(**overrides) -> Settings:
@@ -360,3 +362,27 @@ async def test_unoccupied_but_hot_still_turns_fan_on(app):
             },
         )
     assert resp.json()["fan_command"]["command"] == "ON"
+
+
+# ---------------------------------------------------------------------------
+# Pure climate helpers used by the agent's hybrid mode
+# ---------------------------------------------------------------------------
+
+
+def test_climate_needs_cooling_uses_hysteresis():
+    settings = make_settings()
+    # OFF -> ON at the ON thresholds.
+    assert climate_needs_cooling(28.0, 50.0, FanState.OFF, settings) is True
+    assert climate_needs_cooling(27.9, 50.0, FanState.OFF, settings) is False
+    assert climate_needs_cooling(24.0, 70.0, FanState.OFF, settings) is True
+    # ON -> stays ON between the thresholds, off only once both are cleared.
+    assert climate_needs_cooling(27.0, 50.0, FanState.ON, settings) is True
+    assert climate_needs_cooling(25.0, 66.0, FanState.ON, settings) is True
+    assert climate_needs_cooling(25.0, 64.0, FanState.ON, settings) is False
+
+
+def test_climate_is_extreme_flags_far_outside_band():
+    settings = make_settings()
+    assert climate_is_extreme(35.0, 50.0, settings) is True   # >= temp_on + 3
+    assert climate_is_extreme(29.0, 50.0, settings) is False  # needs cooling, not extreme
+    assert climate_is_extreme(24.0, 45.0, settings) is False
