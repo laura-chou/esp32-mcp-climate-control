@@ -98,3 +98,61 @@ python examples/mcp_agent_consumer.py
 - **🛡️ 穩定與防護**
   - **防連跳護欄**：非緊急切換需間隔 `--min-switch-seconds`（預設 30 秒），保護硬體；MQ 與極端狀況視為緊急、可立即切換。
   - **自動降級**：Ollama 逾時或離線時，無縫退回規則引擎接管（`source=rule-engine`），運作不中斷。
+
+### MCP 整合
+
+`mcp_server.py` 以官方 `mcp` SDK（`MCPServer`）把傳輸層包裝成標準 **MCP Tools / Resources**，
+讓任何 MCP Client / LLM 都能檢索狀態、接收串流事件並下達風扇指令。MCP 伺服器本身是 HTTP 層的
+輕量客戶端，**所有呼叫都轉譯成與 ESP32 / `climate_agent.py` 相同的請求**，因此既有的 FastAPI 路由與
+`CLIMATE_AUTH_TOKEN` 驗證完全不受影響（token 會以 `X-Device-Token` 轉發）。
+
+**Tools**
+
+| 工具 | 用途 |
+| --- | --- |
+| `get_system_status` | 全系統快照（裝置、最新讀值、風扇狀態） |
+| `get_latest_reading` | 指定裝置的最新 DHT11 / PIR / MQ-135 讀值 |
+| `set_fan_state` | 下達 `ON` / `OFF` 風扇指令（含輸入驗證） |
+| `reset_fan_auto` | 將裝置交還規則引擎（解除接管） |
+| `poll_fan_command` | 讀取（可 long-poll）佇列中的風扇指令 |
+| `get_recent_events` | 從 `/api/stream` SSE 取得最近事件 |
+
+**Resources**
+
+| URI | 內容 |
+| --- | --- |
+| `climate://status` | 全系統快照（JSON） |
+| `climate://devices` | 已知裝置清單（JSON） |
+| `climate://devices/{device_id}/reading` | 指定裝置最新讀值（JSON） |
+| `climate://devices/{device_id}/fan` | 指定裝置目前風扇指令（JSON） |
+
+**啟動方式**
+
+```bash
+# stdio 傳輸（供 Claude Desktop / MCP Inspector 使用；需先啟動 python main.py）
+python mcp_server.py --base http://127.0.0.1:8801
+
+# Streamable HTTP 傳輸
+python mcp_server.py --transport streamable-http --host 127.0.0.1 --port 8901
+
+# 若傳輸層啟用了 CLIMATE_AUTH_TOKEN
+python mcp_server.py --base http://127.0.0.1:8801 --token "$CLIMATE_AUTH_TOKEN"
+```
+
+Claude Desktop 設定範例：
+
+```json
+{
+  "mcpServers": {
+    "esp32-climate-control": {
+      "command": "python",
+      "args": ["/path/to/esp32-mcp-climate-control/mcp_server.py", "--base", "http://127.0.0.1:8801"]
+    }
+  }
+}
+```
+
+### 後續整合（尚未實作）
+
+- ✅ 以 `mcp` SDK 將 `/api/stream` 與 `/api/fan/command` 包裝成 MCP tools（已於 `mcp_server.py` 實作）。
+- 需要跨行程 / 多實例時，把 `ClimateHub` 的記憶體匯流排換成 MQTT 或 Redis。

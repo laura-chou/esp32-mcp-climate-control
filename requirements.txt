@@ -10,6 +10,9 @@ sse-starlette>=2.0
 # is optional; uncomment it only if you prefer that SDK.
 # ollama>=0.3
 
+# --- MCP server (exposes the transport layer as MCP tools / resources) ---
+mcp>=1.0
+
 # --- Development / testing ---
 pytest>=8.0
 pytest-asyncio>=0.23
