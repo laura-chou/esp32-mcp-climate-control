@@ -18,7 +18,7 @@ ESP32 ──HTTP POST /api/climate──▶ FastAPI ──SSE /api/stream──�
 ```
 .
 ├── main.py                     # 進入點：python main.py（監聽 0.0.0.0:8801）
-├── climate_agent.py            # 環境代理人：訂閱 SSE →（規則決策 + Ollama 顧問 / 混合模式）→ 回推指令
+├── climate_agent.py            # 環境代理人：訂閱 SSE →（混合模式：規則算氣候 + LLM 權衡 PIR）→ 回推指令
 ├── requirements.txt
 ├── pytest.ini
 ├── server/
@@ -221,7 +221,7 @@ python examples/esp32_simulator.py     # 3. 模擬 ESP32 上報
 ## 環境代理人（climate_agent.py）
 
 對應架構圖的 `climate_agent.py`。它訂閱 `/api/stream`，每收到一筆 `reading`
-就依 `--mode` 決定風扇 ON/OFF，再 `POST /api/fan/command` 回推：
+就以**單一混合智慧模式**決定風扇 ON/OFF，再 `POST /api/fan/command` 回推：
 
 ```
 /api/stream ──reading──▶ climate_agent ──prompt──▶ Ollama
@@ -237,7 +237,26 @@ ollama pull qwen2.5-coder:3b
 python climate_agent.py --model qwen2.5-coder:3b
 ```
 
-### 為什麼預設不是「讓模型決定」？
+### 單一混合模式（無 `--mode` 切換）
+
+`python climate_agent.py` 啟動後只有一條決策路徑，無需選擇模式。每個環節
+都會自動降級到下一層：
+
+1. **空氣安全底線（程式碼強制）**：`mq_triggered=true` → 直接輸出 `ON` 通風，
+   **不呼叫 LLM**。
+2. **氣候預處理（程式碼）**：呼叫 LLM 前，先用 `server/rules.py` 的遲滯邏輯算出
+   `climate_needs_cooling` 與 `climate_is_extreme`。模型**不會拿到原始溫度/濕度數字**，
+   因此無法做數字比較、也就不會幻覺或邊緣震盪。
+3. **LLM 情境調度**：模型只依據語意旗標（`climate_needs_cooling`、`climate_extreme`、
+   `pir_motion`、`current_fan`）結合 `pir_motion` 做節能與舒適度權衡。例如
+   `climate_needs_cooling=true` 但 `pir_motion=false` 且非極端時，模型可基於節能維持 `OFF`。
+4. **安全封套（程式碼攔截）**：模型若在**極端氣候**、或**需要降溫且有人在場**時想關風扇，
+   程式碼會強制改回 `ON`。
+5. **自動降級（Fallback）**：當 Ollama 離線、請求逾時或回傳無效 JSON 時，無縫捕捉例外，
+   由 `server/rules.py` 的 `decide_fan` 接管決策，確保無 AI 時仍穩定運作。
+6. **防連跳**：`min_switch_seconds` 護欄保留；MQ 觸發與極端氣候視為緊急、可立即切換。
+
+### 為什麼不讓模型直接看數字？
 
 小模型（如 `qwen2.5-coder:3b`）**不擅長精確的數值比較**，會出現兩種典型症狀：
 
@@ -254,37 +273,6 @@ python climate_agent.py --model qwen2.5-coder:3b
 - **理由**一律由程式依真實讀值生成（`Agent._describe`），模型寫的自由文字
   **絕不會**成為正式理由。
 
-### 四種模式（`--mode`）
-
-| 模式 | 誰決定 ON/OFF | 是否呼叫模型 | 適用 |
-| --- | --- | --- | --- |
-| `advisor`（預設） | 規則引擎 | 是（僅顧問，記錄建議與是否同意） | 小模型；保留 LLM 觀察性 |
-| `rules` | 規則引擎 | 否 | 最穩定、零延遲；不想依賴 LLM |
-| `hybrid` | 規則引擎算溫濕度、模型決定最終指令 | 是 | **推薦**：小模型也能安全做多模態權衡 |
-| `llm` | 模型（吃原始數字） | 是 | 換成能力較強的模型時 |
-
-```bash
-python climate_agent.py --mode advisor   # 預設：規則決策 + 模型顧問
-python climate_agent.py --mode rules     # 純規則，不呼叫模型
-python climate_agent.py --mode hybrid    # 混合：規則算溫濕度、模型權衡 PIR
-python climate_agent.py --mode llm --model qwen2.5:14b   # 讓較強模型決策
-```
-
-### 混合模式（`--mode hybrid`）
-
-這是最能兼顧「安全」與「多模態智慧」的模式，流程如下：
-
-1. **安全底線（程式碼強制）**：`mq_triggered=true` → 直接輸出 `ON` 通風，**不呼叫 LLM**。
-2. **溫濕度預處理（程式碼）**：呼叫 LLM 前，先用 `server/rules.py` 的遲滯邏輯算出
-   `climate_needs_cooling`（`True`/`False`），並附上 `climate_extreme`。模型**不會拿到
-   原始溫度/濕度數字**，因此無法做數字比較、也就不會幻覺或邊緣震盪。
-3. **LLM 多模態權衡**：模型只依據語意旗標（`climate_needs_cooling`、`climate_extreme`、
-   `pir_motion`、`current_fan`）做最終決策。例如 `climate_needs_cooling=true` 但
-   `pir_motion=false` 且非極端時，模型可基於節能決定維持 `OFF`。
-4. **安全封套（程式碼）**：模型若在**極端氣候**、或**需要降溫且有人在場**時想關風扇，
-   程式碼會強制改回 `ON`。
-5. **防連跳**：`min_switch_seconds` 護欄保留；MQ 觸發與極端氣候視為緊急、可立即切換。
-
 模型收到的 prompt（語意狀態，無原始數字）：
 
 ```
@@ -297,23 +285,27 @@ current_fan: OFF
 Decide the fan command now.
 ```
 
-`advisor` 模式的輸出會同時顯示模型建議與是否同意，方便觀察：
+`[DECIDE]` 輸出會同時顯示決策結果、來源（`climate_agent` 或降級時的 `rule-engine`）
+以及 AI 的簡短理由：
 
 ```
-[DECIDE] esp32-climate-01 T=28.0 H=68.0 cool=True motion=True mq=False -> ON (rule-engine: temperature crossed threshold (T=28.0C, H=68.0%)) | llm DISAGREES: OFF (temperature is above comfort range)
+[DECIDE] esp32-climate-01 T=28.0 H=68.0 cool=True motion=True mq=False -> ON (climate_agent: ON: climate needs cooling (T=28.0C, H=68.0%)) | llm occupant present, cooling required
+[DECIDE] esp32-climate-01 T=24.0 H=45.0 cool=False motion=False mq=True -> ON (rule-engine: MQ-135 air quality threshold exceeded -> ventilate (T=24.0C, H=45.0%))
 ```
+
+（第二行的 `rule-engine` 就是 Ollama 不可用時的自動降級。）
 
 ### 多模態決策
 
 代理人的決策吃三個維度：
 
-1. **舒適帶**：由規則引擎算出 `climate_needs_cooling`（hybrid 模式只傳布林值給模型）。
+1. **舒適帶**：由規則引擎算出 `climate_needs_cooling`（只傳布林值給模型）。
 2. **空氣品質（MQ-135）**：`mq_triggered=true` 時優先開風扇通風。
 3. **佔用／節能（PIR）**：`pir_motion=false`（無人）時傾向關閉省電，
    除非明顯過熱／過濕或空氣品質差。
 
-> ⚠️ **MQ-135 安全聯鎖**：`mq_triggered=true` 是**安全事件**，在**所有模式**
-> （含 `hybrid` / `llm`）都由規則引擎直接強制開風扇通風，模型與舒適帶都不能推翻它。
+> ⚠️ **MQ-135 安全聯鎖**：`mq_triggered=true` 是**安全事件**，一律由規則引擎
+> 直接強制開風扇通風，模型與舒適帶都不能推翻它。
 
 常用參數：
 
@@ -322,24 +314,22 @@ Decide the fan command now.
 | `--base` | `http://127.0.0.1:8801` | 傳輸層位址 |
 | `--ollama` | `http://127.0.0.1:11434` | Ollama 位址 |
 | `--model` | `qwen2.5-coder:3b` | 模型名稱 |
-| `--mode` | `advisor` | `advisor` / `rules` / `hybrid` / `llm` |
 | `--token` | 無 | 對應伺服器的 `CLIMATE_AUTH_TOKEN` |
 | `--min-switch-seconds` | `15` | 非緊急情況下兩次切換的最短間隔（防抖） |
 | `--dry-run` | 關 | 只印決策、不推送指令 |
 
 **設計重點**
 
+- **單一模式**：移除 `--mode` 切換，啟動即為混合模式，降低操作與維護負擔。
 - **決策與說明分離**：正式 `reason` 由程式依真實數字生成，杜絕「理由與數據矛盾」。
-- **混合分工**：`hybrid` 模式由規則引擎算 `climate_needs_cooling`（遲滯、無幻覺），
+- **混合分工**：規則引擎算 `climate_needs_cooling`（遲滯、無幻覺），
   模型只負責 PIR 佔用／節能等語意權衡。
-- **安全封套**：`hybrid` 模式即使模型想關，極端氣候或「需要降溫且有人在場」時
+- **安全封套**：即使模型想關，極端氣候或「需要降溫且有人在場」時
   仍由程式碼強制 `ON`。
-- **MQ-135 安全聯鎖**：`mq_triggered=true` 在所有模式都由規則引擎強制通風，
+- **MQ-135 安全聯鎖**：`mq_triggered=true` 一律由規則引擎強制通風，
   且被視為緊急事件，不受防抖護欄阻擋。
-- **模型僅顧問**：`advisor` 仍呼叫模型並記錄其建議（含 `agrees` / `DISAGREES`），
-  但模型的 command 不會成為正式指令。
-- **`llm` 模式的雙重保險**：即使讓模型決策，正式理由仍由程式生成；解析失敗或
-  連線錯誤時自動退回規則引擎。
+- **自動降級**：Ollama 逾時／離線／回傳無效 JSON 時，自動退回 `rule-engine`
+  決策，`source` 會標示為 `rule-engine`。
 - **防抖護欄**：除非讀值明顯偏離舒適帶（緊急，含 MQ 觸發），否則兩次切換需間隔
   `--min-switch-seconds`，避免抖動造成繼電器狂切。
 - **斷線重連**：SSE 串流中斷時以指數退避自動重連。
@@ -390,8 +380,8 @@ pytest
 
 涵蓋：上報與規則決策、遲滯行為、多模態（PIR 節能 / MQ-135 通風）、輸入驗證、
 代理人覆寫、輪詢 / long-poll、真實 SSE 串流（以 uvicorn 實跑）、token 驗證、
-健康與狀態端點，以及 `climate_agent` 的決策模式（`advisor` / `rules` / `hybrid` / `llm`）、
-混合模式的語意旗標與安全封套、理由生成、JSON 解析與防抖護欄。
+健康與狀態端點，以及 `climate_agent` 的單一混合模式（氣候語意旗標、安全封套、
+Ollama 逾時／無效 JSON 時自動降級）、理由生成、JSON 解析與防抖護欄。
 
 ## 後續整合（尚未實作）
 

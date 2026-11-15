@@ -8,33 +8,25 @@ control loop:
     climate_agent --(POST /api/fan/command)--> FastAPI --> ESP32
 
 It subscribes to the transport layer's SSE stream, asks a local Ollama model to
-advise on every DHT11 reading, and pushes the resulting command back.
+decide on every DHT11 reading, and pushes the resulting command back.
 
-Decision safety
----------------
-Small local models (e.g. ``qwen2.5-coder:3b``) are unreliable at exact numeric
-comparisons: they hallucinate reasons that contradict the reading (e.g.
-"humidity is below 65%" while it is 68%) and flap around a threshold, because
-each token is sampled independently and the model has no hysteresis.
+Hybrid decision model
+---------------------
+There is a single decision path (no mode switch). The work is split by what each
+side is good at, and every layer below degrades gracefully into the next:
 
-The agent therefore splits the work by what each side is good at:
-
-* **Temperature / humidity** -- decided by the deterministic rule engine in
-  ``server/rules.py`` (hysteresis, cannot contradict the numbers). The agent
-  computes a single boolean ``climate_needs_cooling`` and passes it to the model
-  as a *semantic* state, so the model never compares numbers itself.
-* **Multimodal context** -- the model weighs ``pir_motion`` (occupancy / energy)
-  and ``current_fan`` to make the final call.
-* **Safety floor** -- a triggered MQ-135 (bad air) and an extreme climate are
-  enforced in code and can never be overruled.
-
-Modes (``--mode``):
-
-    advisor  (default) rule engine decides; the model advises (logged only)
-    rules              rule engine only; the model is not called at all
-    hybrid             rules precompute the climate flag, the model decides the
-                       final command within a code-enforced safety envelope
-    llm                the model decides on raw numbers (use a capable model)
+* **Air-quality floor** -- a triggered MQ-135 forces ventilation in code, before
+  the model is even consulted.
+* **Climate preprocessing** -- ``server/rules.py`` computes ``climate_needs_cooling``
+  and ``climate_is_extreme`` with hysteresis, so the model never compares numbers
+  itself (which is where small local models hallucinate and flap around a
+  threshold). The model receives these *semantic* flags, not the raw figures.
+* **LLM scheduling** -- the model weighs ``pir_motion`` (occupancy / energy) and
+  ``current_fan`` to make the final call, wrapped in a code-enforced safety
+  envelope.
+* **Automatic fallback** -- if Ollama is offline, times out, or returns invalid
+  JSON, the exception is caught and ``server/rules.py``'s ``decide_fan`` takes
+  over, so the loop keeps running with no AI.
 
 Run the server first, then:
 
@@ -100,7 +92,7 @@ class Decision:
 
 @dataclass
 class Advice:
-    """Free-text advisory from the model (never the authoritative decision)."""
+    """A command proposed by the model (validated before it is accepted)."""
 
     command: str  # "ON" | "OFF"
     reason: str
@@ -164,14 +156,13 @@ class OllamaClient:
 
 
 class Agent:
-    """Turns readings into fan decisions.
+    """Turns readings into fan decisions using the single hybrid path.
 
-    ``advisor`` (default) and ``rules``: the deterministic rule engine decides, so
-    the command can never contradict the reading and never flaps. ``hybrid``: the
-    rule engine precomputes the temperature/humidity verdict
-    (``climate_needs_cooling``) and the model weighs occupancy (PIR) to decide the
-    final command within a code-enforced safety envelope. ``llm``: the model
-    decides on raw numbers (use a capable model).
+    The rule engine precomputes the temperature/humidity verdict
+    (``climate_needs_cooling`` / ``climate_is_extreme``) and the model weighs
+    occupancy (PIR) to decide the final command within a code-enforced safety
+    envelope. When the model is unreachable or returns unusable output, the
+    deterministic ``decide_fan`` rule engine takes over automatically.
     """
 
     def __init__(
@@ -179,14 +170,10 @@ class Agent:
         chat_client,
         model: str,
         min_switch_seconds: float = 15.0,
-        mode: str = "advisor",
         settings: Settings = default_settings,
     ) -> None:
-        if mode not in ("advisor", "rules", "hybrid", "llm"):
-            raise ValueError(f"unknown mode: {mode!r}")
         self._chat = chat_client
         self._model = model
-        self.mode = mode
         self.min_switch_seconds = min_switch_seconds
         self._settings = settings
         self._states: dict[str, str] = {}
@@ -301,29 +288,38 @@ class Agent:
         return Decision(state.value, reason, "rule-engine")
 
     def _consult(self, reading: dict, current: str) -> Advice | None:
-        """Ask the model for advice. Returns ``None`` if unusable/unreachable."""
+        """Ask the model for a command. Returns ``None`` when it is unusable
+        (unreachable, timeout, or invalid JSON) so the caller can fall back."""
 
         try:
             raw = self._chat.chat(self._model, self.build_messages(reading, current))
             parsed = parse_decision(raw)
-        except Exception as exc:  # network error, bad JSON, missing keys, ...
-            print(f"[WARN] ollama call failed: {exc}", file=sys.stderr)
+        except Exception as exc:  # network error, timeout, bad JSON, missing keys
+            print(f"[WARN] ollama call failed: {exc} -> falling back to rule engine", file=sys.stderr)
             return None
         if parsed is None:
+            print(
+                "[WARN] ollama returned no usable JSON -> falling back to rule engine",
+                file=sys.stderr,
+            )
             return None
         command, reason = parsed
         return Advice(command, reason)
 
-    def _decide_llm(self, reading: dict, current: str) -> Decision:
-        advice = self._consult(reading, current)
-        if advice is None:
-            return self._rule_decision(reading, current)
-        return Decision(
-            advice.command,
-            self._describe(advice.command, reading, current),
-            "climate_agent",
-            advice.reason,
-        )
+    def decide(self, reading: dict) -> Decision:
+        device_id = reading["device_id"]
+        current = self.current_state(device_id)
+
+        # Air-quality floor: a triggered MQ-135 forces ventilation in code, before
+        # the model is consulted, so bad air can never be overruled.
+        if bool(reading.get("mq_triggered", False)):
+            decision = self._rule_decision(reading, current)
+        else:
+            decision = self._decide_hybrid(reading, current)
+
+        decision = self._apply_guard(reading, current, decision)
+        self._states[device_id] = decision.command
+        return decision
 
     def _decide_hybrid(self, reading: dict, current: str) -> Decision:
         """Rules precompute the climate flag; the model weighs PIR/occupancy.
@@ -332,7 +328,8 @@ class Agent:
         envelope, so a small model can still make the final multimodal call
         without ever being able to (a) leave the fan off in an extreme climate or
         (b) turn the fan off to "save energy" when cooling is actually required
-        *and* someone is present.
+        *and* someone is present. When the model is unreachable or returns
+        unusable output, the deterministic rule engine takes over (fallback).
         """
 
         advice = self._consult(reading, current)
@@ -354,32 +351,6 @@ class Agent:
             "climate_agent",
             advice.reason,
         )
-
-    def decide(self, reading: dict) -> Decision:
-        device_id = reading["device_id"]
-        current = self.current_state(device_id)
-
-        # Safety floor: a triggered MQ-135 forces ventilation in every mode (even
-        # llm/hybrid) so air quality can never be overruled by the model or the
-        # comfort band.
-        if bool(reading.get("mq_triggered", False)):
-            decision = self._rule_decision(reading, current)
-        elif self.mode == "rules":
-            decision = self._rule_decision(reading, current)
-        elif self.mode == "hybrid":
-            decision = self._decide_hybrid(reading, current)
-        elif self.mode == "llm":
-            decision = self._decide_llm(reading, current)
-        else:  # advisor (default): rules decide, model advises
-            decision = self._rule_decision(reading, current)
-            advice = self._consult(reading, current)
-            if advice is not None:
-                agreement = "agrees" if advice.command == decision.command else "DISAGREES"
-                decision.advice = f"{agreement}: {advice.command} ({advice.reason})"
-
-        decision = self._apply_guard(reading, current, decision)
-        self._states[device_id] = decision.command
-        return decision
 
     def _apply_guard(self, reading: dict, current: str, decision: Decision) -> Decision:
         """Suppress rapid flips from model nondeterminism, unless urgent."""
@@ -490,10 +461,9 @@ def run(args: argparse.Namespace) -> None:
         chat_client,
         model=args.model,
         min_switch_seconds=args.min_switch_seconds,
-        mode=args.mode,
     )
     print(
-        f"[INIT] mode={args.mode} model={args.model} "
+        f"[INIT] hybrid mode model={args.model} "
         f"min_switch_seconds={args.min_switch_seconds}",
         flush=True,
     )
@@ -524,18 +494,6 @@ def main() -> None:
     parser.add_argument("--ollama", default=DEFAULT_OLLAMA, help="Ollama base URL")
     parser.add_argument("--model", default="qwen2.5-coder:3b", help="Ollama model name")
     parser.add_argument("--token", default=None, help="shared token (X-Device-Token)")
-    parser.add_argument(
-        "--mode",
-        choices=("advisor", "rules", "hybrid", "llm"),
-        default="advisor",
-        help=(
-            "advisor: rule engine decides, model advises (default); "
-            "rules: rule engine only, no model calls; "
-            "hybrid: rules precompute the climate flag, the model decides the "
-            "final command within a code-enforced safety envelope; "
-            "llm: model decides on raw numbers (needs a capable model)"
-        ),
-    )
     parser.add_argument(
         "--min-switch-seconds",
         type=float,
