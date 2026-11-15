@@ -1,14 +1,9 @@
 # esp32-mcp-climate-control
 
-![Python](https://img.shields.io/badge/python-3.11%2B-blue)
-![FastAPI](https://img.shields.io/badge/FastAPI-8801-009688)
-![Ollama](https://img.shields.io/badge/Ollama-11434-black)
-![License](https://img.shields.io/badge/license-MIT-green)
-
 **ESP32 + FastAPI + Ollama 智慧風扇控制**：ESP32 上報 DHT11 溫溼度、PIR 人體動態與 MQ-135
 空氣品質，由本機 FastAPI 傳輸層串流，交給「規則引擎 + LLM」混合決策後回推風扇指令。
 
-## System Architecture / 系統架構
+### 系統架構
 
 ```mermaid
 flowchart LR
@@ -45,7 +40,7 @@ flowchart LR
 透過 SSE 推播 `reading` 事件 → `climate_agent.py` 混合決策後 `POST /api/fan/command` 回推 →
 ESP32 以輪詢 / long-poll 取得指令並驅動風扇。
 
-## Quick Start / 快速開始
+### 快速開始
 
 ```bash
 pip install -r requirements.txt
@@ -76,7 +71,7 @@ python examples/mcp_agent_consumer.py
 將 `esp32/config.py` 的 `SERVER_HOST` 改成跑 FastAPI 那台電腦的區網 IP，
 再以 `mpremote` 把 `esp32/config.py` 與 `esp32/main.py` 上傳到開發板即可。
 
-## API Summary / API 一覽
+### API 一覽
 
 | 方法 | 路徑 | 用途 |
 | --- | --- | --- |
@@ -88,14 +83,17 @@ python examples/mcp_agent_consumer.py
 | `GET`  | `/api/health` | 健康檢查 |
 | `GET`  | `/api/status` | 系統快照（裝置、最新讀值、風扇狀態） |
 
-## Core Design / 核心亮點
+### 核心亮點
 
-- **安全底線**：`mq_triggered=true` 一律由程式碼直接強制開風扇通風，不呼叫 LLM；
-  模型若在極端氣候或「需要降溫且有人在場」時想關風扇，安全封套也會強制改回 `ON`
-  （過冷不算極端，風扇無法加熱）。
-- **遲滯（hysteresis）**：`T ≥ 28 °C` 或 `H ≥ 70 %` 開；`T ≤ 26 °C` 且 `H ≤ 65 %` 才關，
-  避免在門檻邊緣反覆切換。
-- **防抖護欄**：非緊急切換需間隔 `--min-switch-seconds`（預設 30 秒）；MQ 觸發與極端氣候
-  視為緊急、可立即切換。
-- **自動降級（Fallback）**：Ollama 離線、逾時或回傳無效 JSON 時，自動退回 `server/rules.py`
-  的規則引擎決策，`source` 標示為 `rule-engine`，確保無 AI 時仍穩定運作。
+- **🔒 三層安全底線**
+  - **MQ-135 優先**：氣體異味超標時強制開風扇，不經 LLM。
+  - **極端氣候保護**：極端溫濕度強制開啟；過冷時維持關閉（風扇無法加熱）。
+  - **安全封套**：AI 若在有人或極端狀況下試圖關風扇，系統會強制覆寫為 `ON`。
+
+- **🧠 混合分工機制**
+  - **遲滯預處理**：溫濕度由規則引擎轉為布林旗標（`T ≥ 28°C / H ≥ 70%` 開，`T ≤ 26°C / H ≤ 65%` 關），杜絕模型幻覺。
+  - **AI 節能調度**：模型專注權衡 PIR 人體佔用，無人且非極端時自動 `OFF` 省電。
+
+- **🛡️ 穩定與防護**
+  - **30 秒防連跳**：限制非緊急切換間隔，保護硬體壽命（MQ 與極端狀況可立即切換）。
+  - **自動降級**：Ollama 逾時或離線時，無縫退回規則引擎接管，確保運作不中斷。
