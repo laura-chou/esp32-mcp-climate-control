@@ -31,7 +31,7 @@ ESP32 ──HTTP POST /api/climate──▶ FastAPI ──SSE /api/stream──�
 │   ├── esp32_simulator.py      # 模擬 ESP32：上報資料 + 輪詢指令
 │   └── mcp_agent_consumer.py   # 精簡版 MCP 消費者（佔位決策，示範用）
 ├── esp32/                      # ⚠️ ESP32 端 MicroPython 韌體（放到開發板上）
-│   ├── main.py                 # 讀 DHT11 + PIR + MQ-135 → 上報 → 輪詢指令 → 控制繼電器
+│   ├── main.py                 # 讀 DHT11 + PIR + MQ-135 → 上報 → 輪詢指令 → 控制 L9110 風扇
 │   └── config.py               # WiFi、PC IP、腳位設定（要先編輯）
 └── tests/
     ├── test_transport.py       # pytest 測試（含真實 SSE 串流）
@@ -159,11 +159,11 @@ curl -X POST http://127.0.0.1:8801/api/fan/command \
 | DHT11 資料腳 | GPIO21 |
 | PIR 人體感測（數位輸出） | GPIO14 |
 | MQ-135 空氣品質 DO（數位輸出） | GPIO27 |
-| 繼電器 INL（左） | GPIO22 |
-| 繼電器 INR（右） | GPIO23 |
+| L9110 馬達驅動 INL | GPIO22 |
+| L9110 馬達驅動 INR | GPIO23 |
 
-兩個繼電器由同一道指令同步開關。多數廉價繼電器板是**低電位觸發**（LOW = 開）；
-若你的板子是**高電位觸發**，把 `config.py` 的 `RELAY_ACTIVE_LOW` 改成 `False`。
+風扇由 L9110 馬達驅動 IC 控制，兩支接腳的輸出組合固定寫在 `main.py` 的
+`set_fan()`：開風扇為 `INL=0 / INR=1`，關風扇為 `INL=0 / INR=0`。
 
 PIR 模組多為**高電位觸發**（有動態 = HIGH，`PIR_ACTIVE_HIGH = True`）；
 MQ-135 模組的 DO 多為**低電位觸發**（超過門檻 = LOW，`MQ_ACTIVE_LOW = True`）。
@@ -185,7 +185,7 @@ MQ-135 模組的 DO 多為**低電位觸發**（超過門檻 = LOW，`MQ_ACTIVE_
    ```
 
 3. ESP32 開機後會自動執行：連 Wi-Fi → 每 5 秒讀 DHT11 + PIR + MQ-135 並 `POST /api/climate` →
-   依回應與 `GET /api/fan/command` 的指令切換繼電器。
+   依回應與 `GET /api/fan/command` 的指令驅動 L9110 風扇。
 
 > ⚠️ `SERVER_HOST` 不能填 `192.168.0.0` —— 那是網段位址，不是可連線的主機。
 > 要用電腦的實際 IP（Windows 用 `ipconfig`，Linux/macOS 用 `ip addr` 查）。
@@ -250,8 +250,9 @@ python climate_agent.py --model qwen2.5-coder:3b
 3. **LLM 情境調度**：模型只依據語意旗標（`climate_needs_cooling`、`climate_extreme`、
    `pir_motion`、`current_fan`）結合 `pir_motion` 做節能與舒適度權衡。例如
    `climate_needs_cooling=true` 但 `pir_motion=false` 且非極端時，模型可基於節能維持 `OFF`。
-4. **安全封套（程式碼攔截）**：模型若在**極端氣候**、或**需要降溫且有人在場**時想關風扇，
-   程式碼會強制改回 `ON`。
+4. **安全封套（程式碼攔截）**：模型若在**極端氣候**（過熱／過濕）、或**需要降溫且有人在場**時
+   想關風扇，程式碼會強制改回 `ON`。注意**過冷不算極端**——風扇無法加熱，室溫過低時
+   維持 `OFF`，唯一會強制通風的例外是 MQ-135 氣體異常。
 5. **自動降級（Fallback）**：當 Ollama 離線、請求逾時或回傳無效 JSON 時，無縫捕捉例外，
    由 `server/rules.py` 的 `decide_fan` 接管決策，確保無 AI 時仍穩定運作。
 6. **防連跳**：`min_switch_seconds` 護欄保留；MQ 觸發與極端氣候視為緊急、可立即切換。
@@ -269,7 +270,7 @@ python climate_agent.py --model qwen2.5-coder:3b
 
 - **溫濕度判斷**交給確定性的 `server/rules.py`（含遲滯，永不與數字矛盾）。
 - **多模態情境**（PIR 佔用／節能、當前風扇狀態）交給 LLM 權衡。
-- **安全底線**（MQ-135 空氣品質、極端溫濕度）由程式碼強制執行，不可被推翻。
+- **安全底線**（MQ-135 空氣品質、極端高溫／高濕）由程式碼強制執行，不可被推翻。
 - **理由**一律由程式依真實讀值生成（`Agent._describe`），模型寫的自由文字
   **絕不會**成為正式理由。
 
@@ -315,7 +316,7 @@ Decide the fan command now.
 | `--ollama` | `http://127.0.0.1:11434` | Ollama 位址 |
 | `--model` | `qwen2.5-coder:3b` | 模型名稱 |
 | `--token` | 無 | 對應伺服器的 `CLIMATE_AUTH_TOKEN` |
-| `--min-switch-seconds` | `15` | 非緊急情況下兩次切換的最短間隔（防抖） |
+| `--min-switch-seconds` | `30` | 非緊急情況下兩次切換的最短間隔（防抖） |
 | `--dry-run` | 關 | 只印決策、不推送指令 |
 
 **設計重點**

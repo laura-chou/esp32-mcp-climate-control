@@ -177,6 +177,17 @@ def test_envelope_forces_on_when_extreme_even_unoccupied():
     assert "extreme" in decision.reason
 
 
+def test_cold_room_is_not_extreme_and_model_may_keep_off():
+    # A cold room must not be treated as extreme; the model's OFF stands (the fan
+    # cannot heat, so being too cold is not a reason to run it).
+    chat = FakeChat(['{"command": "OFF", "reason": "cold"}'])
+    agent = Agent(chat, model="m", min_switch_seconds=0)
+    decision = agent.decide(make_reading(temperature=18.0, humidity=45.0, pir_motion=True))
+    assert decision.command == "OFF"
+    assert "extreme" not in decision.reason
+    assert "comfortable" in decision.reason
+
+
 # ---------------------------------------------------------------------------
 # automatic fallback to the deterministic rule engine
 # ---------------------------------------------------------------------------

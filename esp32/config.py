@@ -25,8 +25,8 @@ DEVICE_TOKEN = None
 
 # --- Pins ------------------------------------------------------------------
 DHT_PIN = 21          # DHT11 data pin
-RELAY_INL_PIN = 22    # left relay / fan
-RELAY_INR_PIN = 23    # right relay / fan
+RELAY_INL_PIN = 22    # L9110 INL (left) input
+RELAY_INR_PIN = 23    # L9110 INR (right) input
 PIR_PIN = 14          # PIR motion sensor (digital input)
 MQ_PIN = 27           # MQ-135 air-quality DO (digital trigger input)
 
@@ -36,9 +36,9 @@ PIR_ACTIVE_HIGH = True
 # Most MQ-135 breakout boards pull DO LOW when the gas threshold is exceeded.
 MQ_ACTIVE_LOW = True
 
-# Most cheap relay boards are active-LOW (a LOW signal turns the relay on).
-# Set to False if your board is active-HIGH.
-RELAY_ACTIVE_LOW = True
+# Fan drive is an L9110 motor driver: the on/off pattern is fixed in main.py's
+# set_fan() (INL=0/INR=1 to run, INL=0/INR=0 to stop), so there is no polarity
+# setting to configure here.
 
 # --- Sensor validity window (DHT11) ----------------------------------------
 # DHT11 physical measurement range. Reads outside this window are almost always

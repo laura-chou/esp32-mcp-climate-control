@@ -15,7 +15,11 @@ import uvicorn
 from server.app import create_app
 from server.config import Settings
 from server.models import FanState
-from server.rules import climate_is_extreme, climate_needs_cooling
+from server.rules import (
+    climate_is_extreme,
+    climate_needs_cooling,
+    decide_fan,
+)
 
 
 def make_settings(**overrides) -> Settings:
@@ -386,3 +390,27 @@ def test_climate_is_extreme_flags_far_outside_band():
     assert climate_is_extreme(35.0, 50.0, settings) is True   # >= temp_on + 3
     assert climate_is_extreme(29.0, 50.0, settings) is False  # needs cooling, not extreme
     assert climate_is_extreme(24.0, 45.0, settings) is False
+
+
+def test_climate_is_extreme_ignores_a_cold_room():
+    # A cold room must never be "extreme": the fan cannot heat, so being too cold
+    # must not force ventilation (only a triggered MQ-135 does that).
+    settings = make_settings()  # temp_off_c=26 -> the old cold clause tripped at <=23
+    assert climate_is_extreme(20.0, 45.0, settings) is False
+    assert climate_is_extreme(5.0, 45.0, settings) is False
+    # humidity can still make it extreme even when cold
+    assert climate_is_extreme(20.0, 80.0, settings) is True
+
+
+def test_decide_fan_keeps_off_when_too_cold():
+    # Even with motion present, a cold room must not turn the fan on.
+    settings = make_settings()
+    state, reason = decide_fan(18.0, 45.0, FanState.OFF, settings, pir_motion=True)
+    assert state is FanState.OFF
+    assert "comfortable" in reason
+    # ...but a triggered MQ-135 still forces ventilation, cold or not.
+    state, reason = decide_fan(
+        18.0, 45.0, FanState.OFF, settings, pir_motion=True, mq_triggered=True
+    )
+    assert state is FanState.ON
+    assert "MQ-135" in reason

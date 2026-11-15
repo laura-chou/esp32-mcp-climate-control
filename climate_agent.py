@@ -169,7 +169,7 @@ class Agent:
         self,
         chat_client,
         model: str,
-        min_switch_seconds: float = 15.0,
+        min_switch_seconds: float = 30.0,
         settings: Settings = default_settings,
     ) -> None:
         self._chat = chat_client
@@ -497,7 +497,7 @@ def main() -> None:
     parser.add_argument(
         "--min-switch-seconds",
         type=float,
-        default=15.0,
+        default=30.0,
         help="minimum seconds between non-urgent fan flips (0 disables)",
     )
     parser.add_argument(

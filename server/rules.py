@@ -45,16 +45,19 @@ def climate_needs_cooling(
 def climate_is_extreme(
     temperature_c: float, humidity: float, settings: Settings
 ) -> bool:
-    """Return True when the climate is far outside the band (safety, not comfort).
+    """Return True when the climate is far too hot/humid (safety, not comfort).
 
     These are the conditions under which energy saving must never win: the room is
-    genuinely hot/humid (or freezing), so the fan must run regardless of occupancy.
+    genuinely hot/humid, so the fan must run regardless of occupancy.
+
+    A cold room is deliberately NOT extreme -- the fan cannot heat, so being too
+    cold must never force it on (the only forced-ventilation path left is a
+    triggered MQ-135 gas reading).
     """
 
     return (
         temperature_c >= settings.temp_on_c + 3.0
         or humidity >= settings.humidity_on + 5.0
-        or temperature_c <= settings.temp_off_c - 3.0
     )
 
 

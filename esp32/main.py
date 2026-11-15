@@ -35,7 +35,6 @@ from config import (
     PIR_ACTIVE_HIGH,
     PIR_PIN,
     READ_INTERVAL_S,
-    RELAY_ACTIVE_LOW,
     RELAY_INL_PIN,
     RELAY_INR_PIN,
     SERVER_HOST,
@@ -75,16 +74,13 @@ def connect_wifi():
     return wlan
 
 
-def relay_level(on):
-    if RELAY_ACTIVE_LOW:
-        return 0 if on else 1
-    return 1 if on else 0
-
-
 def set_fan(on):
-    level = relay_level(on)
-    relay_inl.value(level)
-    relay_inr.value(level)
+    if on:
+        relay_inl.value(0)
+        relay_inr.value(1)
+    else:
+        relay_inl.value(0)
+        relay_inr.value(0)
 
 
 def reading_is_valid(temperature, humidity):
