@@ -40,6 +40,24 @@ flowchart LR
 透過 SSE 推播 `reading` 事件 → `climate_agent.py` 混合決策後 `POST /api/fan/command` 回推 →
 ESP32 以輪詢 / long-poll 取得指令並驅動風扇。
 
+### 模組結構（單一真實來源）
+
+所有與傳輸層通訊的 HTTP 呼叫都集中在 **`core_logic.py`**（單一真實來源），
+`mcp_server.py` 與 `climate_agent.py` 都只引用它，不各自重寫連線邏輯：
+
+```
+main.py              FastAPI 傳輸層：資料驗證、狀態管理、硬體通訊、安全防護（Port 8801）
+core_logic.py        與 FastAPI 互動的標準介面：TransportClient + core_* 便利函式
+mcp_server.py        MCP 橋樑：把 core_logic 包成 Tools / Resources（stdio / JSON-RPC）
+climate_agent.py     本地 Agent：用同一組 core_logic 函式跑自主決策迴圈
+server/              FastAPI 應用（app / models / state / rules / config）
+```
+
+**錯誤處理**：`core_logic.TransportError` 統一封裝連線逾時、連線被拒、非 2xx 與 JSON 解碼失敗，
+呼叫端不需認識 `httpx` 例外。後端未啟動時會 fail-fast 並提示 `is 'python main.py' running?`；
+`climate_agent.py` 會據此以指數退避自動重連。串流讀取另以 `TransportTimeout`（`TransportError`
+子類）界定時限，確保工具呼叫不會因 keep-alive 而無限等待。
+
 ### 快速開始
 
 ```bash
@@ -102,9 +120,10 @@ python examples/mcp_agent_consumer.py
 ### MCP 整合
 
 `mcp_server.py` 以官方 `mcp` SDK（`MCPServer`）把傳輸層包裝成標準 **MCP Tools / Resources**，
-讓任何 MCP Client / LLM 都能檢索狀態、接收串流事件並下達風扇指令。MCP 伺服器本身是 HTTP 層的
-輕量客戶端，**所有呼叫都轉譯成與 ESP32 / `climate_agent.py` 相同的請求**，因此既有的 FastAPI 路由與
-`CLIMATE_AUTH_TOKEN` 驗證完全不受影響（token 會以 `X-Device-Token` 轉發）。
+讓任何 MCP Client / LLM 都能檢索狀態、接收串流事件並下達風扇指令。MCP 伺服器只處理協議層
+（stdio / JSON-RPC），**所有後端呼叫都經由 `core_logic.py`**（單一真實來源），與 `climate_agent.py`
+共用同一組函式，因此既有的 FastAPI 路由與 `CLIMATE_AUTH_TOKEN` 驗證完全不受影響
+（token 會以 `X-Device-Token` 轉發）。
 
 **Tools**
 

@@ -21,7 +21,8 @@ import uvicorn
 from mcp.client._memory import InMemoryTransport
 from mcp.client.session import ClientSession
 
-from mcp_server import ClimateTransportClient, build_server
+from core_logic import TransportClient
+from mcp_server import build_server
 from server.app import create_app
 from server.config import Settings
 
@@ -81,7 +82,7 @@ async def open_session(base_url: str, token: str | None = None):
     it down from a different task).
     """
 
-    client = ClimateTransportClient(base_url=base_url, token=token)
+    client = TransportClient(base_url=base_url, token=token)
     server = build_server(client=client)
     try:
         async with InMemoryTransport(server) as (read, write):
@@ -89,7 +90,7 @@ async def open_session(base_url: str, token: str | None = None):
                 await session.initialize()
                 yield session
     finally:
-        await client.aclose()
+        client.close()
 
 
 def _structured(result) -> dict:

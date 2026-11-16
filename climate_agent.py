@@ -47,11 +47,11 @@ from dataclasses import dataclass
 
 import httpx
 
+from core_logic import DEFAULT_BASE, TransportClient, TransportError
 from server.config import Settings, settings as default_settings
 from server.models import FanState
 from server.rules import climate_is_extreme, climate_needs_cooling, decide_fan
 
-DEFAULT_BASE = "http://127.0.0.1:8801"
 DEFAULT_OLLAMA = "http://127.0.0.1:11434"
 
 SYSTEM_PROMPT = (
@@ -171,11 +171,13 @@ class Agent:
         model: str,
         min_switch_seconds: float = 30.0,
         settings: Settings = default_settings,
+        dry_run: bool = False,
     ) -> None:
         self._chat = chat_client
         self._model = model
         self.min_switch_seconds = min_switch_seconds
         self._settings = settings
+        self.dry_run = dry_run
         self._states: dict[str, str] = {}
         self._last_switch: dict[str, float] = {}
 
@@ -375,12 +377,12 @@ class Agent:
         return decision
 
 
-def _seed_states(client: httpx.Client, base: str, agent: Agent) -> None:
+def _seed_states(client: TransportClient, agent: Agent) -> None:
     """Load current fan commands so the first decision knows the baseline."""
 
     try:
-        status = client.get(f"{base}/api/status").json()
-    except Exception as exc:
+        status = client.get_system_status()
+    except TransportError as exc:
         print(f"[WARN] could not read /api/status: {exc}", file=sys.stderr)
         return
     for device_id, info in (status.get("devices") or {}).items():
@@ -389,51 +391,27 @@ def _seed_states(client: httpx.Client, base: str, agent: Agent) -> None:
             agent.remember(device_id, command)
 
 
-def _push_command(
-    client: httpx.Client, base: str, reading: dict, decision: Decision
-) -> None:
-    response = client.post(
-        f"{base}/api/fan/command",
-        json={
-            "command": decision.command,
-            "reason": decision.reason,
-            "source": decision.source,
-            "device_id": reading["device_id"],
-        },
+def _push_command(client: TransportClient, reading: dict, decision: Decision) -> None:
+    client.control_fan(
+        decision.command,
+        device_id=reading["device_id"],
+        reason=decision.reason,
+        source=decision.source,
     )
-    response.raise_for_status()
 
 
-def consume_stream(args: argparse.Namespace, agent: Agent) -> None:
+def consume_stream(client: TransportClient, agent: Agent) -> None:
     """Subscribe to /api/stream and handle reading events until the stream ends."""
 
-    headers = {"X-Device-Token": args.token} if args.token else {}
-    with httpx.Client(headers=headers, timeout=None) as client:
-        _seed_states(client, args.base, agent)
-        with client.stream("GET", f"{args.base}/api/stream") as stream:
-            event = "message"
-            for line in stream.iter_lines():
-                if line == "":
-                    event = "message"
-                    continue
-                if line.startswith(":"):
-                    continue
-                if line.startswith("event:"):
-                    event = line.split(":", 1)[1].strip()
-                    continue
-                if not line.startswith("data:"):
-                    continue
-
-                data = json.loads(line.split(":", 1)[1].strip())
-                if event == "reading":
-                    _handle_reading(client, args, agent, data)
-                elif event == "snapshot":
-                    print(f"[INIT] snapshot seq={data.get('seq')}", flush=True)
+    _seed_states(client, agent)
+    for event, data in client.iter_events():
+        if event == "reading":
+            _handle_reading(client, agent, data)
+        elif event == "snapshot":
+            print(f"[INIT] snapshot seq={data.get('seq')}", flush=True)
 
 
-def _handle_reading(
-    client: httpx.Client, args: argparse.Namespace, agent: Agent, reading: dict
-) -> None:
+def _handle_reading(client: TransportClient, agent: Agent, reading: dict) -> None:
     previous = agent.current_state(reading["device_id"])
     needs_cooling = agent.climate_needs_cooling(reading, previous)
     decision = agent.decide(reading)
@@ -447,11 +425,11 @@ def _handle_reading(
     if decision.advice:
         line += f" | llm {decision.advice}"
     print(line, flush=True)
-    if args.dry_run:
+    if agent.dry_run:
         return
     try:
-        _push_command(client, args.base, reading, decision)
-    except Exception as exc:
+        _push_command(client, reading, decision)
+    except TransportError as exc:
         print(f"[WARN] failed to push command: {exc}", file=sys.stderr)
 
 
@@ -461,6 +439,7 @@ def run(args: argparse.Namespace) -> None:
         chat_client,
         model=args.model,
         min_switch_seconds=args.min_switch_seconds,
+        dry_run=args.dry_run,
     )
     print(
         f"[INIT] hybrid mode model={args.model} "
@@ -469,19 +448,20 @@ def run(args: argparse.Namespace) -> None:
     )
     backoff = 1
     try:
-        while True:
-            try:
-                consume_stream(args, agent)
-                backoff = 1
-            except KeyboardInterrupt:
-                raise
-            except Exception as exc:
-                print(
-                    f"[WARN] stream error: {exc}; reconnecting in {backoff}s",
-                    file=sys.stderr,
-                )
-                time.sleep(backoff)
-                backoff = min(backoff * 2, 30)
+        with TransportClient(base_url=args.base, token=args.token) as client:
+            while True:
+                try:
+                    consume_stream(client, agent)
+                    backoff = 1
+                except KeyboardInterrupt:
+                    raise
+                except TransportError as exc:
+                    print(
+                        f"[WARN] stream error: {exc}; reconnecting in {backoff}s",
+                        file=sys.stderr,
+                    )
+                    time.sleep(backoff)
+                    backoff = min(backoff * 2, 30)
     except KeyboardInterrupt:
         print("\n[INFO] climate_agent stopped", file=sys.stderr)
     finally:

@@ -304,9 +304,8 @@ def test_mq_ventilation_is_applied_despite_recent_switch():
 
 def test_decide_log_line_reports_source_and_reason(capsys):
     chat = FakeChat(['{"command": "ON", "reason": "occupant present"}'])
-    agent = Agent(chat, model="m", min_switch_seconds=0)
-    args = argparse.Namespace(base="http://127.0.0.1:8801", dry_run=True)
-    climate_agent._handle_reading(None, args, agent, make_reading(temperature=30.0))
+    agent = Agent(chat, model="m", min_switch_seconds=0, dry_run=True)
+    climate_agent._handle_reading(None, agent, make_reading(temperature=30.0))
     out = capsys.readouterr().out
     assert "[DECIDE]" in out
     assert "-> ON" in out
@@ -316,9 +315,8 @@ def test_decide_log_line_reports_source_and_reason(capsys):
 
 def test_decide_log_line_reports_rule_engine_fallback(capsys):
     chat = FakeChat([RuntimeError("down")])
-    agent = Agent(chat, model="m", min_switch_seconds=0)
-    args = argparse.Namespace(base="http://127.0.0.1:8801", dry_run=True)
-    climate_agent._handle_reading(None, args, agent, make_reading(temperature=31.0))
+    agent = Agent(chat, model="m", min_switch_seconds=0, dry_run=True)
+    climate_agent._handle_reading(None, agent, make_reading(temperature=31.0))
     out = capsys.readouterr().out
     assert "rule-engine:" in out
     assert "-> ON" in out
