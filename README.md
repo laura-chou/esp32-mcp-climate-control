@@ -14,25 +14,24 @@ flowchart LR
     end
 
     subgraph TRANSPORT["FastAPI 傳輸層 (Port 8801)"]
-        API["main.py<br/>驗證 · 狀態 · 安全"]
-        HUB["ClimateHub<br/>狀態 + SSE 匯流排"]
-        API --- HUB
+        API["main.py & ClimateHub<br/>狀態管理與 SSE 匯流排"]
     end
 
     subgraph CONTROL["雙軌控制中樞"]
-        MCP["mcp_server.py<br/>MCP Tools / Resources"]
+        direction TB
+        MCP["mcp_server.py<br/>MCP 伺服器"]
         AGENT["climate_agent.py<br/>本機自主 Agent"]
-        CORE["core_logic.py<br/>單一真實來源"]
         OLLAMA["Ollama (11434)"]
+        CORE["core_logic.py<br/>單一真實來源 (HTTP Client)"]
         MCP --> CORE
         AGENT --> CORE
         AGENT --> OLLAMA
     end
 
-    FW <-->|"1 上報 / 4 輪詢指令"| API
-    HUB -->|"2 SSE 串流"| AGENT
-    AGENT -->|"3 決策（經 core_logic）"| API
-    CLAUDE["Claude Desktop"] -.-> MCP
+    FW <-->|"1. 上報讀值 / 4. 輪詢指令"| API
+    API -->|"2. SSE 事件串流"| AGENT
+    CORE -->|"3. 透過共用核心回推指令"| API
+    CLAUDE["Claude Desktop"] -.->|"MCP 協議"| MCP
 ```
 
 閉環資料流：ESP32 上報 → FastAPI 存檔並以 SSE 推播 → Agent 混合決策後（經 `core_logic`）
