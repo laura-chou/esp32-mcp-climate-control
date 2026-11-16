@@ -3,7 +3,7 @@
 **ESP32 + FastAPI + Ollama + MCP 智慧氣候控制**：ESP32 上報環境讀值，由本機 FastAPI
 傳輸層串流，交給「規則引擎 + LLM」混合決策後回推風扇指令。
 
-## 系統架構
+### 系統架構
 
 三層分層：**ESP32 邊緣硬體** → **FastAPI 傳輸層** → **雙軌控制中樞**。
 
@@ -40,7 +40,7 @@ flowchart LR
 模組職責：`main.py`（傳輸層）· `core_logic.py`（與 FastAPI 互動的單一真實來源，MCP 與 Agent
 共用）· `mcp_server.py`（MCP 橋樑）· `climate_agent.py`（本機自主決策迴圈）· `server/`（FastAPI 應用）。
 
-## 快速開始
+### 快速開始
 
 ```bash
 pip install -r requirements.txt
@@ -58,9 +58,9 @@ python climate_agent.py --model qwen2.5-coder:3b
 python examples/mcp_agent_consumer.py
 ```
 
-互動式 API 文件：<http://127.0.0.1:8801/docs>
+互動式 API 文件：`http://127.0.0.1:8801/docs`（請換成您的電腦區網 IP）
 
-## API 一覽
+### API 一覽
 
 | 方法 | 路徑 | 用途 |
 | --- | --- | --- |
@@ -72,7 +72,7 @@ python examples/mcp_agent_consumer.py
 | `GET`  | `/api/health` | 健康檢查 |
 | `GET`  | `/api/status` | 系統快照（裝置、最新讀值、風扇狀態） |
 
-## 核心亮點
+### 核心亮點
 
 - **🔒 三層安全底線**：MQ-135 異味超標強制開風扇（不經 LLM）；`T ≥ 31°C` 或 `H ≥ 75%`
   極端氣候強制開啟、過冷維持關閉；AI 若在需要降溫且有人在場時試圖關扇，程式碼強制覆寫為 `ON`。
@@ -83,7 +83,7 @@ python examples/mcp_agent_consumer.py
 - **🔌 MCP 雙軌**：Claude Desktop 透過 `mcp_server.py` 以標準 Tools / Resources 互動；本機 Agent
   結合 Ollama 跑背景決策，兩者共用 `core_logic`。
 
-## ESP32 接線表
+### ESP32 接線表
 
 | 元件 | ESP32 腳位 | 備註 |
 | --- | --- | --- |
@@ -147,3 +147,13 @@ Claude Desktop 設定範例：
   }
 }
 ```
+
+### Demo
+
+透過 Claude Desktop 連結 MCP 伺服器後，即可直接透過自然語言查詢環境數據或遙控硬體：
+
+**1. 查詢即時系統狀態與感測器讀值**：
+<img src="./assets/demo_status.jpg" alt="Claude 查詢系統狀態" width="600">
+
+**2. 下達控制指令（開關風扇）與安全提示**：
+<img src="./assets/demo_control.jpg" alt="Claude 操控風扇" width="600">
