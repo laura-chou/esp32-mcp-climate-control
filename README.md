@@ -29,10 +29,9 @@ flowchart LR
         AGENT --> OLLAMA
     end
 
-    FW -->|"1. 上報讀值"| API
-    HUB -->|"2. SSE 串流"| AGENT
-    AGENT -->|"3. 決策（經 core_logic）"| API
-    API -->|"4. 輪詢指令"| FW
+    FW <-->|"1 上報 / 4 輪詢指令"| API
+    HUB -->|"2 SSE 串流"| AGENT
+    AGENT -->|"3 決策（經 core_logic）"| API
     CLAUDE["Claude Desktop"] -.-> MCP
 ```
 
