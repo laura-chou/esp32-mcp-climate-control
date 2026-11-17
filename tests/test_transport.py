@@ -196,6 +196,69 @@ async def test_agent_command_overrides_rule_engine(app):
 
 
 @pytest.mark.asyncio
+async def test_status_reports_manual_override_for_mcp_control(app):
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        await client.post(
+            "/api/climate",
+            json={"dht11_temperature": 26.0, "dht11_humidity": 50.0},
+        )
+
+        # Baseline: the rule engine owns the device -> no manual override.
+        status = (await client.get("/api/status")).json()["devices"]["esp32-climate-01"]
+        assert status["manual_override"] is False
+        assert status["control_mode"] == "auto"
+        assert status["control_source"] is None
+
+        # A human command over MCP flips the device into manual control.
+        await client.post(
+            "/api/fan/command",
+            json={
+                "command": "ON",
+                "source": "mcp",
+                "reason": "human override",
+                "device_id": "esp32-climate-01",
+            },
+        )
+        status = (await client.get("/api/status")).json()["devices"]["esp32-climate-01"]
+        assert status["manual_override"] is True
+        assert status["control_mode"] == "agent"
+        assert status["control_source"] == "mcp"
+
+        # reset_fan_auto hands it back: the override clears.
+        reset = await client.post(
+            "/api/fan/auto", params={"device_id": "esp32-climate-01"}
+        )
+        assert reset.json()["was_agent_controlled"] is True
+        status = (await client.get("/api/status")).json()["devices"]["esp32-climate-01"]
+        assert status["manual_override"] is False
+        assert status["control_source"] is None
+
+
+@pytest.mark.asyncio
+async def test_agent_control_is_not_flagged_as_manual_override(app):
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        await client.post(
+            "/api/climate",
+            json={"dht11_temperature": 26.0, "dht11_humidity": 50.0},
+        )
+        # climate_agent (the autonomous loop) taking over is not a human override.
+        await client.post(
+            "/api/fan/command",
+            json={
+                "command": "ON",
+                "source": "climate_agent",
+                "device_id": "esp32-climate-01",
+            },
+        )
+        status = (await client.get("/api/status")).json()["devices"]["esp32-climate-01"]
+        assert status["control_mode"] == "agent"
+        assert status["control_source"] == "climate_agent"
+        assert status["manual_override"] is False
+
+
+@pytest.mark.asyncio
 async def test_fan_command_poll_and_long_poll(app):
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:

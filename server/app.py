@@ -266,6 +266,9 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             readings[device_id] = {
                 "reading": reading.model_dump(mode="json"),
                 "online": dev_status.online if dev_status else False,
+                "control_mode": hub.control_mode(device_id),
+                "control_source": hub.control_source(device_id),
+                "manual_override": hub.manual_override(device_id),
                 "fan_command": (
                     hub.get_fan_command(device_id).model_dump(mode="json")
                     if hub.get_fan_command(device_id)

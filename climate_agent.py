@@ -17,6 +17,9 @@ side is good at, and every layer below degrades gracefully into the next:
 
 * **Air-quality floor** -- a triggered MQ-135 forces ventilation in code, before
   the model is even consulted.
+* **Human-first yield** -- if a human has taken manual control (e.g. Claude
+  Desktop over MCP), the loop skips its LLM reasoning and never writes a fan
+  command, so it cannot clobber the manual setting until ``reset_fan_auto``.
 * **Climate preprocessing** -- ``server/rules.py`` computes ``climate_needs_cooling``
   and ``climate_is_extreme`` with hysteresis, so the model never compares numbers
   itself (which is where small local models hallucinate and flap around a
@@ -53,6 +56,10 @@ from server.models import FanState
 from server.rules import climate_is_extreme, climate_needs_cooling, decide_fan
 
 DEFAULT_OLLAMA = "http://127.0.0.1:11434"
+
+# Fan-command sources that mean a human took the wheel (e.g. Claude Desktop over
+# MCP). While one of these owns the device the agent yields instead of deciding.
+MANUAL_OVERRIDE_SOURCES = frozenset({"mcp", "manual"})
 
 SYSTEM_PROMPT = (
     "You are climate_agent, the multimodal environment control agent for a room. "
@@ -400,6 +407,34 @@ def _push_command(client: TransportClient, reading: dict, decision: Decision) ->
     )
 
 
+def manual_override_active(status: dict, device_id: str) -> bool:
+    """True when ``/api/status`` reports a human (e.g. MCP) owning ``device_id``.
+
+    The transport layer exposes this two ways; either is enough: the
+    ``manual_override`` boolean, or a ``control_source`` naming a manual owner.
+    """
+
+    device = (status.get("devices") or {}).get(device_id) or {}
+    if device.get("manual_override") is True:
+        return True
+    return device.get("control_source") in MANUAL_OVERRIDE_SOURCES
+
+
+def _agent_must_yield(client: TransportClient, device_id: str) -> bool:
+    """Poll the system status and report whether the agent should stand down.
+
+    A status read failure is treated as "no override" (fail-open) so a transient
+    transport blip cannot stall the control loop; the agent just keeps deciding.
+    """
+
+    try:
+        status = client.get_system_status()
+    except TransportError as exc:
+        print(f"[WARN] could not read /api/status: {exc}", file=sys.stderr)
+        return False
+    return manual_override_active(status, device_id)
+
+
 def consume_stream(client: TransportClient, agent: Agent) -> None:
     """Subscribe to /api/stream and handle reading events until the stream ends."""
 
@@ -412,7 +447,18 @@ def consume_stream(client: TransportClient, agent: Agent) -> None:
 
 
 def _handle_reading(client: TransportClient, agent: Agent, reading: dict) -> None:
-    previous = agent.current_state(reading["device_id"])
+    device_id = reading["device_id"]
+
+    # Human-first: if Claude Desktop (or any MCP client) has taken manual control,
+    # yield completely -- no LLM call, no set_fan_state -- until reset_fan_auto.
+    if client is not None and _agent_must_yield(client, device_id):
+        print(
+            "[SKIP] Manual override active (controlled by MCP), skipping auto-decision.",
+            flush=True,
+        )
+        return
+
+    previous = agent.current_state(device_id)
     needs_cooling = agent.climate_needs_cooling(reading, previous)
     decision = agent.decide(reading)
     line = (

@@ -27,6 +27,10 @@ from .rules import decide_fan
 
 logger = logging.getLogger("climate.hub")
 
+# Command sources that represent a human taking the wheel (e.g. Claude Desktop
+# over MCP). While one of these owns a device, the autonomous agent must yield.
+MANUAL_OVERRIDE_SOURCES = frozenset({"mcp", "manual"})
+
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
@@ -50,6 +54,8 @@ class ClimateHub:
         self._fan_commands: dict[str, FanCommand] = {}
         # Devices currently controlled by the AI agent instead of the rule engine.
         self._agent_control: dict[str, datetime] = {}
+        # Source of the most recent command per device (e.g. "mcp", "climate_agent").
+        self._last_source: dict[str, str] = {}
 
         self._seq = 0
         self._fan_condition = asyncio.Condition()
@@ -122,6 +128,28 @@ class ClimateHub:
 
         return "auto" if self._is_auto(device_id) else "agent"
 
+    def control_source(self, device_id: str) -> Optional[str]:
+        """Source of the last command that took the device over, if any.
+
+        Returns ``None`` for a device the rule engine still owns (it was never
+        overridden by the agent or a human).
+        """
+
+        if self._is_auto(device_id):
+            return None
+        return self._last_source.get(device_id)
+
+    def manual_override(self, device_id: str) -> bool:
+        """True while a human (e.g. Claude Desktop over MCP) owns the device.
+
+        This is the signal the autonomous agent polls before each decision: as
+        long as it holds, the agent skips its LLM reasoning and never writes a
+        fan command, so it cannot clobber a manual setting. ``reset_fan_auto``
+        (or the agent-override TTL) clears it.
+        """
+
+        return self.control_source(device_id) in MANUAL_OVERRIDE_SOURCES
+
     def _is_auto(self, device_id: str) -> bool:
         """True when the rule engine (not the agent) owns this device."""
 
@@ -191,6 +219,7 @@ class ClimateHub:
                 seq=self._seq,
             )
             self._fan_commands[device_id] = record
+            self._last_source[device_id] = source
             if from_agent:
                 self._agent_control[device_id] = _utcnow()
             self._fan_condition.notify_all()
@@ -244,6 +273,7 @@ class ClimateHub:
         """Hand control back to the rule engine. Returns True if it was agent-owned."""
 
         was_agent = self._agent_control.pop(device_id, None) is not None
+        self._last_source.pop(device_id, None)
         logger.info(
             "device=%s reset to auto (was_agent_controlled=%s)", device_id, was_agent
         )

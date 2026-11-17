@@ -102,6 +102,10 @@ python examples/mcp_agent_consumer.py
   無縫退回規則引擎（`source=rule-engine`）。
 - **🔌 MCP 雙軌**：Claude Desktop 透過 `mcp_server.py` 以標準 Tools / Resources 互動；本機 Agent
   結合 Ollama 跑背景決策，兩者共用 `core_logic`。
+- **🙋 人類手動介入優先**：一旦 Claude Desktop（MCP，`source=mcp`）手動控制風扇，本機 Agent 在
+  每次決策前會先讀取系統狀態，偵測到 `manual_override` 即主動退讓（印出
+  `[SKIP] Manual override active (controlled by MCP)`），跳過 LLM 推理與指令寫入，直到呼叫
+  `reset_fan_auto` 才恢復自動決策，確保手動設定不被覆蓋。
 
 ### ESP32 接線表
 

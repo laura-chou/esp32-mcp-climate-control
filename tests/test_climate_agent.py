@@ -320,3 +320,119 @@ def test_decide_log_line_reports_rule_engine_fallback(capsys):
     out = capsys.readouterr().out
     assert "rule-engine:" in out
     assert "-> ON" in out
+
+
+# ---------------------------------------------------------------------------
+# manual override (MCP): the agent yields and never clobbers a human setting
+# ---------------------------------------------------------------------------
+
+
+class FakeTransport:
+    """Stand-in for TransportClient: serves a status snapshot and records pushes."""
+
+    def __init__(self, status=None, error=None):
+        self.status = status or {"devices": {}}
+        self.error = error
+        self.pushed = []
+
+    def get_system_status(self):
+        if self.error is not None:
+            raise self.error
+        return self.status
+
+    def control_fan(self, command, device_id=None, reason="", source="core"):
+        self.pushed.append((command, device_id, source))
+        return {"command": command}
+
+
+def _status_with_override(device_id="esp32-climate-01", source="mcp"):
+    return {
+        "devices": {
+            device_id: {
+                "manual_override": source in climate_agent.MANUAL_OVERRIDE_SOURCES,
+                "control_source": source,
+            }
+        }
+    }
+
+
+def test_manual_override_active_reads_status_flag():
+    assert (
+        climate_agent.manual_override_active(
+            _status_with_override(source="mcp"), "esp32-climate-01"
+        )
+        is True
+    )
+    assert (
+        climate_agent.manual_override_active(
+            _status_with_override(source="manual"), "esp32-climate-01"
+        )
+        is True
+    )
+    # climate_agent / rule-engine ownership is NOT a manual override.
+    assert (
+        climate_agent.manual_override_active(
+            _status_with_override(source="climate_agent"), "esp32-climate-01"
+        )
+        is False
+    )
+    assert climate_agent.manual_override_active({"devices": {}}, "d") is False
+
+
+def test_manual_override_active_honours_bare_boolean():
+    status = {"devices": {"d": {"manual_override": True}}}
+    assert climate_agent.manual_override_active(status, "d") is True
+
+
+def test_handle_reading_yields_under_manual_override(capsys):
+    chat = FakeChat(['{"command": "ON", "reason": "should not be asked"}'])
+    agent = Agent(chat, model="m", min_switch_seconds=0)
+    client = FakeTransport(status=_status_with_override(source="mcp"))
+
+    climate_agent._handle_reading(client, agent, make_reading(temperature=35.0))
+
+    out = capsys.readouterr().out
+    assert "[SKIP] Manual override active (controlled by MCP)" in out
+    # No LLM call and no fan write happened.
+    assert chat.calls == []
+    assert client.pushed == []
+    # The agent's known state is untouched (no auto decision was made).
+    assert agent.current_state("esp32-climate-01") == "OFF"
+
+
+def test_handle_reading_resumes_after_reset(capsys):
+    chat = FakeChat(['{"command": "ON", "reason": "hot"}'])
+    agent = Agent(chat, model="m", min_switch_seconds=0)
+    client = FakeTransport(status=_status_with_override(source="mcp"))
+
+    # 1. Under manual control: skip.
+    climate_agent._handle_reading(client, agent, make_reading(temperature=35.0))
+    assert chat.calls == []
+    assert client.pushed == []
+    assert "[SKIP]" in capsys.readouterr().out
+
+    # 2. reset_fan_auto -> the next status shows no override.
+    client.status = {"devices": {"esp32-climate-01": {"manual_override": False, "control_source": None}}}
+    climate_agent._handle_reading(client, agent, make_reading(temperature=35.0))
+
+    assert len(chat.calls) == 1
+    assert client.pushed == [("ON", "esp32-climate-01", "climate_agent")]
+    out = capsys.readouterr().out
+    assert "[SKIP]" not in out
+    assert "[DECIDE]" in out
+
+
+def test_handle_reading_fails_open_when_status_unreachable(capsys):
+    # A transient status error must not stall the loop: the agent still decides.
+    from core_logic import TransportError
+
+    chat = FakeChat(['{"command": "ON", "reason": "hot"}'])
+    agent = Agent(chat, model="m", min_switch_seconds=0)
+    client = FakeTransport(error=TransportError("backend down"))
+
+    climate_agent._handle_reading(client, agent, make_reading(temperature=35.0))
+
+    assert len(chat.calls) == 1
+    assert client.pushed == [("ON", "esp32-climate-01", "climate_agent")]
+    err = capsys.readouterr().err
+    assert "could not read /api/status" in err
