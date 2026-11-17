@@ -128,6 +128,31 @@ class ClimateHub:
 
         return "auto" if self._is_auto(device_id) else "agent"
 
+    def _override_active(self, device_id: str) -> bool:
+        """True while an override owns this device (rule engine must stand down).
+
+        Manual overrides (MCP / human) persist until ``reset_fan_auto`` -- the
+        human is never timed out. Agent overrides expire after
+        ``agent_override_ttl_s`` so a stalled agent hands control back.
+        """
+
+        since = self._agent_control.get(device_id)
+        if since is None:
+            return False
+        if self._last_source.get(device_id) in MANUAL_OVERRIDE_SOURCES:
+            return True
+        ttl = self._settings.agent_override_ttl_s
+        if ttl > 0 and (_utcnow() - since).total_seconds() > ttl:
+            self._agent_control.pop(device_id, None)
+            self._last_source.pop(device_id, None)
+            logger.info(
+                "device=%s agent override expired after %.0fs; back to auto",
+                device_id,
+                ttl,
+            )
+            return False
+        return True
+
     def control_source(self, device_id: str) -> Optional[str]:
         """Source of the last command that took the device over, if any.
 
@@ -135,7 +160,7 @@ class ClimateHub:
         overridden by the agent or a human).
         """
 
-        if self._is_auto(device_id):
+        if not self._override_active(device_id):
             return None
         return self._last_source.get(device_id)
 
@@ -144,28 +169,16 @@ class ClimateHub:
 
         This is the signal the autonomous agent polls before each decision: as
         long as it holds, the agent skips its LLM reasoning and never writes a
-        fan command, so it cannot clobber a manual setting. ``reset_fan_auto``
-        (or the agent-override TTL) clears it.
+        fan command, so it cannot clobber a manual setting. It is cleared only
+        by ``reset_fan_auto`` (a human lock does not expire on a timer).
         """
 
         return self.control_source(device_id) in MANUAL_OVERRIDE_SOURCES
 
     def _is_auto(self, device_id: str) -> bool:
-        """True when the rule engine (not the agent) owns this device."""
+        """True when the rule engine (not the agent or a human) owns this device."""
 
-        since = self._agent_control.get(device_id)
-        if since is None:
-            return True
-        ttl = self._settings.agent_override_ttl_s
-        if ttl > 0 and (_utcnow() - since).total_seconds() > ttl:
-            self._agent_control.pop(device_id, None)
-            logger.info(
-                "device=%s agent override expired after %.0fs; back to auto",
-                device_id,
-                ttl,
-            )
-            return True
-        return False
+        return not self._override_active(device_id)
 
     async def _apply_rule_engine(
         self, envelope: ClimateReadingEnvelope

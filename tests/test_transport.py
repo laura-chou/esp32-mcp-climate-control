@@ -477,3 +477,48 @@ def test_decide_fan_keeps_off_when_too_cold():
     )
     assert state is FanState.ON
     assert "MQ-135" in reason
+
+
+# ---------------------------------------------------------------------------
+# Override lifetime: manual (MCP) locks persist; agent overrides expire
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_manual_override_survives_agent_ttl():
+    """A human lock must not be timed out by agent_override_ttl_s."""
+    from datetime import timedelta
+
+    from server.models import FanState as _FanState
+    from server.state import ClimateHub, _utcnow
+
+    hub = ClimateHub(make_settings(agent_override_ttl_s=1.0))
+    await hub.set_fan_command("dev", _FanState.OFF, reason="human", source="mcp")
+
+    # Backdate the override far past the TTL, as if it happened long ago.
+    hub._agent_control["dev"] = _utcnow() - timedelta(seconds=600)
+
+    assert hub.manual_override("dev") is True
+    assert hub.control_source("dev") == "mcp"
+    assert hub.control_mode("dev") == "agent"
+    # The manual lock is still holding: the rule engine must not run.
+    assert hub._is_auto("dev") is False
+
+
+@pytest.mark.asyncio
+async def test_agent_override_still_expires_after_ttl():
+    """An agent override is released by the TTL so the rule engine resumes."""
+    from datetime import timedelta
+
+    from server.models import FanState as _FanState
+    from server.state import ClimateHub, _utcnow
+
+    hub = ClimateHub(make_settings(agent_override_ttl_s=1.0))
+    await hub.set_fan_command("dev", _FanState.OFF, reason="agent", source="climate_agent")
+    hub._agent_control["dev"] = _utcnow() - timedelta(seconds=600)
+
+    assert hub.manual_override("dev") is False
+    assert hub.control_mode("dev") == "auto"
+    assert hub._is_auto("dev") is True
+    # The stale source is cleaned up alongside the expired override.
+    assert hub.control_source("dev") is None
