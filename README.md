@@ -40,6 +40,28 @@ flowchart LR
 模組職責：`main.py`（傳輸層）· `core_logic.py`（與 FastAPI 互動的單一真實來源，MCP 與 Agent
 共用）· `mcp_server.py`（MCP 橋樑）· `climate_agent.py`（本機自主決策迴圈）· `server/`（FastAPI 應用）。
 
+### 專案目錄結構
+
+```text
+esp32-mcp-climate-control/
+├── assets/                    # 專案截圖與視覺資源（如 Demo 截圖）
+├── esp32/                     # ESP32 邊緣硬體韌體
+│   ├── config.py              # 網路參數與感測器 GPIO 接線設定
+│   └── main.py                # MicroPython 主程式（感測器採集與指令輪詢）
+├── examples/                  # 範例與輔助程式
+│   ├── esp32_simulator.py     # ESP32 裝置模擬器
+│   └── mcp_agent_consumer.py  # 無 Ollama 時的模擬決策範例腳本
+├── server/                    # FastAPI 後端商務邏輯與狀態管理模組
+├── tests/                     # 單元測試與自動化驗證腳本
+├── climate_agent.py           # 本機自主 Agent（結合 Ollama 的背景決策迴圈）
+├── core_logic.py              # 單一真實來源（HTTP Client 封裝，供 MCP 與 Agent 共用）
+├── main.py                    # FastAPI 伺服器啟動入口 (Port 8801)
+├── mcp_server.py              # MCP 伺服器（Claude Desktop 與系統溝通的橋樑）
+├── pytest.ini                 # Pytest 測試配置設定
+├── requirements.txt           # Python 套件依賴清單
+└── README.md                  # 專案說明文件
+```
+
 ### 快速開始
 
 ```bash
@@ -54,7 +76,7 @@ python climate_agent.py --model qwen2.5-coder:3b
 
 # 2b. Claude Desktop 互動模式：把 MCP server 掛進 Claude Desktop（見下方 MCP 整合）
 
-# 3.（選用）沒有 Ollama 時，改用佔位決策的示範消費者
+# 3.（選用）若未安裝 Ollama，可改用內建模擬決策的範例腳本
 python examples/mcp_agent_consumer.py
 ```
 
