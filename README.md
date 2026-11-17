@@ -44,7 +44,6 @@ flowchart LR
 
 ```text
 esp32-mcp-climate-control/
-├── assets/                    # 專案截圖與視覺資源（如 Demo 截圖）
 ├── esp32/                     # ESP32 邊緣硬體韌體
 │   ├── config.py              # 網路參數與感測器 GPIO 接線設定
 │   └── main.py                # MicroPython 主程式（感測器採集與指令輪詢）
@@ -58,8 +57,7 @@ esp32-mcp-climate-control/
 ├── main.py                    # FastAPI 伺服器啟動入口 (Port 8801)
 ├── mcp_server.py              # MCP 伺服器（Claude Desktop 與系統溝通的橋樑）
 ├── pytest.ini                 # Pytest 測試配置設定
-├── requirements.txt           # Python 套件依賴清單
-└── README.md                  # 專案說明文件
+└── requirements.txt           # Python 套件依賴清單
 ```
 
 ### 快速開始
@@ -109,7 +107,7 @@ python examples/mcp_agent_consumer.py
 
 | 元件 | ESP32 腳位 | 備註 |
 | --- | --- | --- |
-| DHT11 溫溼度 | GPIO 21 | 量測範圍 0~50 °C / 20~90 % |
+| DHT11 溫溼度 | GPIO 21 | 量測範圍 0～50 °C / 20～90 % |
 | PIR 人體感測 | GPIO 14 | 高電位觸發（`PIR_ACTIVE_HIGH = True`） |
 | MQ-135 空氣品質 | GPIO 27 | 低電位觸發（`MQ_ACTIVE_LOW = True`） |
 | L9110 風扇 | GPIO 22 / 23 | INL / INR，`INL=0/INR=1` 運轉、`INL=0/INR=0` 停止 |
